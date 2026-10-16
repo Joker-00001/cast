@@ -486,7 +486,7 @@ class MainActivity : AppCompatActivity() {
                     binding.btnCast.isEnabled = true
                     binding.btnStop.visibility = View.VISIBLE
                 } else {
-                    updateStatus("Erreur Xbox (${xboxIp}:10243) : Vérifiez que le Lecteur Multimédia / DLNA est ouvert sur la Xbox", isLoading = false)
+                    updateStatus("Erreur Xbox (${xboxIp}) : ${error.localizedMessage}", isLoading = false)
                     binding.btnCast.isEnabled = true
                     Toast.makeText(
                         this@MainActivity,
