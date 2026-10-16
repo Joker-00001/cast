@@ -3,10 +3,8 @@ package com.xboxvideocaster.dlna
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -17,9 +15,10 @@ import java.util.Locale
 import kotlin.concurrent.thread
 
 /**
- * Mini serveur Proxy HTTP local permettant de relayer n'importe quel flux (.m3u8, .ts, .mp4)
- * vers la Xbox en ajoutant automatiquement les headers Referer / Origin / User-Agent requis
- * par les hébergeurs vidéo (Vidmoly, Minochinos, Sendvid, Sibnet, etc.).
+ * Serveur Proxy & Convertisseur temps-réel pour Xbox One / Series :
+ * - Pour les flux HLS (.m3u8) : télécharge et fusionne les segments .ts en continu (remuxing live)
+ *   en un seul flux MPEG-TS continu (video/vnd.dlna.mpeg-tts) que la Xbox décode nativement sans écran noir !
+ * - Pour les flux .mp4 : relaie le flux avec support du Range HTTP et injection des headers Referer / Origin.
  */
 class LocalStreamProxy(private val context: Context) {
 
@@ -28,24 +27,19 @@ class LocalStreamProxy(private val context: Context) {
     var port: Int = 8989
         private set
 
-    @Volatile
-    private var currentTargetUrl: String = ""
+    private data class StreamConfig(
+        val url: String,
+        val referer: String,
+        val userAgent: String
+    )
 
-    @Volatile
-    private var currentReferer: String = "https://anime-sama.to/"
-
-    @Volatile
-    private var currentUserAgent: String =
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-
-    private val urlRegistry = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val streamRegistry = java.util.concurrent.ConcurrentHashMap<String, StreamConfig>()
 
     fun start() {
         if (isRunning) return
         isRunning = true
         thread(start = true, isDaemon = true, name = "XboxLocalStreamProxy") {
             try {
-                // Essayer le port 8989 ou un port libre
                 serverSocket = try {
                     ServerSocket(8989)
                 } catch (e: Exception) {
@@ -74,32 +68,37 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
-     * Prépare une URL locale que la Xbox peut lire directement sans blocage de Referer/CORS
+     * Crée une URL compatible DLNA Xbox :
+     * - Si la source est un .m3u8 (HLS), l'URL se termine par .ts et streame un flux MPEG-TS continu.
+     * - Si la source est un .mp4, l'URL se termine par .mp4.
      */
     fun createProxyUrl(realStreamUrl: String, referer: String?, userAgent: String?): String {
         start()
-        currentTargetUrl = realStreamUrl
-        if (!referer.isNullOrBlank()) currentReferer = referer
-        if (!userAgent.isNullOrBlank()) currentUserAgent = userAgent
+        val ref = if (!referer.isNullOrBlank()) referer else "https://anime-sama.to/"
+        val ua = if (!userAgent.isNullOrBlank()) userAgent else
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
         val localIp = getLocalIpAddress() ?: "127.0.0.1"
-        val id = "main_" + System.currentTimeMillis()
-        urlRegistry[id] = realStreamUrl
+        val id = "vid_" + System.currentTimeMillis()
+        streamRegistry[id] = StreamConfig(realStreamUrl, ref, ua)
 
-        val ext = if (realStreamUrl.contains(".m3u8", ignoreCase = true)) ".m3u8" else ".mp4"
-        return "http://$localIp:$port/stream/$id$ext"
+        val isHls = realStreamUrl.contains(".m3u8", ignoreCase = true) ||
+                realStreamUrl.contains("urlset", ignoreCase = true)
+        val ext = if (isHls) ".ts" else ".mp4"
+        return "http://$localIp:$port/xbox/$id$ext"
     }
 
     private fun handleClient(socket: Socket) {
         socket.use { client ->
             try {
+                client.soTimeout = 30000
                 val input = client.getInputStream().bufferedReader()
                 val requestLine = input.readLine() ?: return
                 val parts = requestLine.split(" ")
                 if (parts.size < 2) return
+                val method = parts[0].uppercase(Locale.ROOT)
                 val path = parts[1]
 
-                // Lire les headers de la Xbox (notamment Range pour le seek dans les MP4)
                 var rangeHeader: String? = null
                 var line: String?
                 while (input.readLine().also { line = it } != null && line!!.isNotEmpty()) {
@@ -108,117 +107,185 @@ class LocalStreamProxy(private val context: Context) {
                     }
                 }
 
-                // Identifier quelle URL distante est demandée
-                val key = path.substringAfter("/stream/").substringBefore(".m3u8").substringBefore(".mp4").substringBefore("?")
-                val targetUrl = urlRegistry[key] ?: currentTargetUrl
-                if (targetUrl.isBlank()) return
+                val key = path.substringAfter("/xbox/")
+                    .substringBefore(".ts")
+                    .substringBefore(".mp4")
+                    .substringBefore("?")
 
-                val connection = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 10000
-                    readTimeout = 15000
-                    instanceFollowRedirects = true
-                    setRequestProperty("User-Agent", currentUserAgent)
-                    setRequestProperty("Referer", currentReferer)
-                    try {
-                        val refUri = URL(currentReferer)
-                        setRequestProperty("Origin", "${refUri.protocol}://${refUri.host}")
-                    } catch (_: Exception) {
-                    }
-                    if (rangeHeader != null) {
-                        setRequestProperty("Range", rangeHeader)
-                    }
-                }
-
-                val responseCode = connection.responseCode
-                val contentType = connection.contentType ?: if (targetUrl.contains(".m3u8")) "application/vnd.apple.mpegurl" else "video/mp4"
-                val isM3u8 = targetUrl.contains(".m3u8", ignoreCase = true) ||
-                        contentType.contains("mpegurl", ignoreCase = true)
-
+                val config = streamRegistry[key] ?: streamRegistry.values.lastOrNull() ?: return
                 val out = client.getOutputStream()
 
-                if (isM3u8 && responseCode in 200..299) {
-                    // Réécrire le fichier .m3u8 pour que chaque segment passe aussi par notre proxy
-                    val m3u8Content = connection.inputStream.bufferedReader().readText()
-                    val rewrittenM3u8 = rewriteM3u8(m3u8Content, targetUrl)
-                    val bytes = rewrittenM3u8.toByteArray(Charsets.UTF_8)
+                val isHls = config.url.contains(".m3u8", ignoreCase = true) ||
+                        config.url.contains("urlset", ignoreCase = true)
 
-                    val header = buildString {
-                        append("HTTP/1.1 200 OK\r\n")
-                        append("Content-Type: application/vnd.apple.mpegurl\r\n")
-                        append("Content-Length: ${bytes.size}\r\n")
-                        append("Access-Control-Allow-Origin: *\r\n")
-                        append("Connection: close\r\n\r\n")
-                    }
-                    out.write(header.toByteArray())
-                    out.write(bytes)
-                    out.flush()
+                if (isHls) {
+                    serveHlsAsContinuousMpegTs(method, config, out)
                 } else {
-                    // Flux binaire direct (.ts, .mp4, .aac, etc.)
-                    val statusLine = if (responseCode == 206) "HTTP/1.1 206 Partial Content" else "HTTP/1.1 200 OK"
-                    val contentLength = connection.getHeaderField("Content-Length")
-                    val contentRange = connection.getHeaderField("Content-Range")
-                    val acceptRanges = connection.getHeaderField("Accept-Ranges") ?: "bytes"
-
-                    val header = buildString {
-                        append("$statusLine\r\n")
-                        append("Content-Type: $contentType\r\n")
-                        if (contentLength != null) append("Content-Length: $contentLength\r\n")
-                        if (contentRange != null) append("Content-Range: $contentRange\r\n")
-                        append("Accept-Ranges: $acceptRanges\r\n")
-                        append("Access-Control-Allow-Origin: *\r\n")
-                        append("Connection: close\r\n\r\n")
-                    }
-                    out.write(header.toByteArray())
-
-                    val remoteIn: InputStream = connection.inputStream
-                    val buffer = ByteArray(16384)
-                    var read: Int
-                    while (remoteIn.read(buffer).also { read = it } != -1) {
-                        out.write(buffer, 0, read)
-                    }
-                    out.flush()
+                    serveDirectMp4(method, config, rangeHeader, out)
                 }
             } catch (e: Exception) {
-                Log.w("LocalStreamProxy", "Client disconnected or error: ${e.message}")
+                Log.w("LocalStreamProxy", "Client connection closed: ${e.message}")
             }
         }
     }
 
-    private fun rewriteM3u8(content: String, baseUrl: String): String {
-        val localIp = getLocalIpAddress() ?: "127.0.0.1"
-        val baseUri = URL(baseUrl)
-        val lines = content.lines()
-        val sb = StringBuilder()
+    /**
+     * Télécharge la playlist HLS (.m3u8), sélectionne la meilleure qualité,
+     * puis envoie tous les segments .ts bout-à-bout en un seul flux continu compatible Xbox DLNA !
+     */
+    private fun serveHlsAsContinuousMpegTs(method: String, config: StreamConfig, out: OutputStream) {
+        val headers = buildString {
+            append("HTTP/1.1 200 OK\r\n")
+            append("Content-Type: video/vnd.dlna.mpeg-tts\r\n")
+            append("transferMode.dlna.org: Streaming\r\n")
+            append("contentFeatures.dlna.org: DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+            append("Access-Control-Allow-Origin: *\r\n")
+            append("Connection: close\r\n\r\n")
+        }
+        out.write(headers.toByteArray())
+        out.flush()
 
-        for (line in lines) {
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) {
-                sb.append("\n")
-                continue
-            }
-            if (trimmed.startsWith("#")) {
-                // Vérifier s'il y a un URI="..." dans un tag #EXT-X-KEY ou #EXT-X-MAP
-                if (trimmed.contains("URI=\"")) {
-                    val uriValue = trimmed.substringAfter("URI=\"").substringBefore("\"")
-                    val resolved = resolveUrl(baseUri, uriValue)
-                    val subId = "seg_" + resolved.hashCode().toUInt().toString(16)
-                    urlRegistry[subId] = resolved
-                    val proxied = "http://$localIp:$port/stream/$subId"
-                    sb.append(trimmed.replace("URI=\"$uriValue\"", "URI=\"$proxied\"")).append("\n")
-                } else {
-                    sb.append(trimmed).append("\n")
-                }
-            } else {
-                val resolved = resolveUrl(baseUri, trimmed)
-                val subId = "seg_" + resolved.hashCode().toUInt().toString(16)
-                urlRegistry[subId] = resolved
-                val isSubM3u8 = resolved.contains(".m3u8", ignoreCase = true)
-                val suffix = if (isSubM3u8) ".m3u8" else ".mp4"
-                val proxied = "http://$localIp:$port/stream/$subId$suffix"
-                sb.append(proxied).append("\n")
+        if (method == "HEAD") return
+
+        // 1. Récupérer le contenu du fichier .m3u8 initial
+        val firstM3u8 = fetchTextWithHeaders(config.url, config) ?: return
+        val baseUri = URL(config.url)
+
+        // 2. Est-ce un Master Playlist (contenant #EXT-X-STREAM-INF) ?
+        var mediaPlaylistUrl = config.url
+        var mediaPlaylistText = firstM3u8
+
+        if (firstM3u8.contains("#EXT-X-STREAM-INF")) {
+            val variantUrl = pickBestVariantUrl(firstM3u8, baseUri)
+            if (variantUrl != null) {
+                mediaPlaylistUrl = variantUrl
+                mediaPlaylistText = fetchTextWithHeaders(variantUrl, config) ?: return
             }
         }
-        return sb.toString()
+
+        // 3. Extraire la liste de tous les segments .ts de la Media Playlist
+        val mediaBaseUri = URL(mediaPlaylistUrl)
+        val segmentUrls = mutableListOf<String>()
+        for (rawLine in mediaPlaylistText.lines()) {
+            val trimmed = rawLine.trim()
+            if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                segmentUrls.add(resolveUrl(mediaBaseUri, trimmed))
+            }
+        }
+
+        // 4. Streamer chaque segment .ts séquentiellement dans le même flux HTTP vers la Xbox
+        val buffer = ByteArray(32768)
+        for (segUrl in segmentUrls) {
+            val conn = openConnectionWithHeaders(segUrl, config, null)
+            try {
+                if (conn.responseCode in 200..299) {
+                    conn.inputStream.use { segIn ->
+                        var read: Int
+                        while (segIn.read(buffer).also { read = it } != -1) {
+                            out.write(buffer, 0, read)
+                        }
+                    }
+                    out.flush()
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }
+    }
+
+    private fun pickBestVariantUrl(masterText: String, baseUri: URL): String? {
+        val lines = masterText.lines()
+        for (i in lines.indices) {
+            val line = lines[i].trim()
+            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                // La ligne suivante non-vide et non-commentaire est l'URL de la variante (souvent la meilleure résolution en 1er)
+                for (j in (i + 1) until lines.size) {
+                    val next = lines[j].trim()
+                    if (next.isNotEmpty() && !next.startsWith("#")) {
+                        return resolveUrl(baseUri, next)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    private fun serveDirectMp4(
+        method: String,
+        config: StreamConfig,
+        rangeHeader: String?,
+        out: OutputStream
+    ) {
+        val conn = openConnectionWithHeaders(config.url, config, rangeHeader)
+        try {
+            val code = conn.responseCode
+            val statusLine = if (code == 206) "HTTP/1.1 206 Partial Content" else "HTTP/1.1 200 OK"
+            val contentType = conn.contentType ?: "video/mp4"
+            val contentLength = conn.getHeaderField("Content-Length")
+            val contentRange = conn.getHeaderField("Content-Range")
+            val acceptRanges = conn.getHeaderField("Accept-Ranges") ?: "bytes"
+
+            val headers = buildString {
+                append("$statusLine\r\n")
+                append("Content-Type: $contentType\r\n")
+                if (contentLength != null) append("Content-Length: $contentLength\r\n")
+                if (contentRange != null) append("Content-Range: $contentRange\r\n")
+                append("Accept-Ranges: $acceptRanges\r\n")
+                append("transferMode.dlna.org: Streaming\r\n")
+                append("contentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+                append("Access-Control-Allow-Origin: *\r\n")
+                append("Connection: close\r\n\r\n")
+            }
+            out.write(headers.toByteArray())
+            out.flush()
+
+            if (method == "HEAD") return
+
+            val remoteIn: InputStream = conn.inputStream
+            val buffer = ByteArray(32768)
+            var read: Int
+            while (remoteIn.read(buffer).also { read = it } != -1) {
+                out.write(buffer, 0, read)
+            }
+            out.flush()
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun fetchTextWithHeaders(url: String, config: StreamConfig): String? {
+        val conn = openConnectionWithHeaders(url, config, null)
+        return try {
+            if (conn.responseCode in 200..299) {
+                conn.inputStream.bufferedReader().readText()
+            } else null
+        } catch (_: Exception) {
+            null
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun openConnectionWithHeaders(
+        targetUrl: String,
+        config: StreamConfig,
+        rangeHeader: String?
+    ): HttpURLConnection {
+        return (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10000
+            readTimeout = 15000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", config.userAgent)
+            setRequestProperty("Referer", config.referer)
+            try {
+                val refUri = URL(config.referer)
+                setRequestProperty("Origin", "${refUri.protocol}://${refUri.host}")
+            } catch (_: Exception) {
+            }
+            if (rangeHeader != null) {
+                setRequestProperty("Range", rangeHeader)
+            }
+        }
     }
 
     private fun resolveUrl(base: URL, relativeOrAbsolute: String): String {
@@ -230,7 +297,7 @@ class LocalStreamProxy(private val context: Context) {
             } else {
                 URL(base, relativeOrAbsolute).toString()
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             relativeOrAbsolute
         }
     }

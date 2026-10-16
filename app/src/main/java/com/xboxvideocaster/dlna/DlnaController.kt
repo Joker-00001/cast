@@ -138,8 +138,8 @@ class DlnaController(
             val escapedUri = escapeXml(videoUri)
             val escapedTitle = escapeXml(title)
 
-            val protocolInfo = if (videoUri.contains(".m3u8", ignoreCase = true)) {
-                "http-get:*:application/vnd.apple.mpegurl:*"
+            val protocolInfo = if (videoUri.endsWith(".ts", ignoreCase = true)) {
+                "http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             } else {
                 "http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             }

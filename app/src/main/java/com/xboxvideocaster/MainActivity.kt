@@ -61,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_LAST_PAGE = "key_last_page"
         private const val DEFAULT_XBOX_IP = "192.168.1.52"
         private const val ANIME_SAMA_HOME = "https://anime-sama.to/"
+        private const val FRENCH_STREAM_HOME = "https://fs26.lol/"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,9 +81,9 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         checkAppUpdateAuto()
 
+        // Si un lien est partagé depuis une autre app, l'ouvrir directement, sinon afficher le Hub de choix de site
         if (!handleIncomingIntent(intent)) {
-            val savedPage = prefs.getString(KEY_LAST_PAGE, ANIME_SAMA_HOME) ?: ANIME_SAMA_HOME
-            loadBrowserUrl(savedPage)
+            showHomeHub()
         }
     }
 
@@ -92,6 +93,13 @@ class MainActivity : AppCompatActivity() {
         intent?.let { handleIncomingIntent(it) }
     }
 
+    private fun showHomeHub() {
+        binding.layoutHomeHub.visibility = View.VISIBLE
+        val savedPage = prefs.getString(KEY_LAST_PAGE, null)
+        binding.btnResumeLastPage.visibility = if (savedPage.isNullOrBlank()) View.GONE else View.VISIBLE
+        updateStatus("Choisissez une plateforme ci-dessus", isLoading = false)
+    }
+
     private fun checkAppUpdateAuto() {
         lifecycleScope.launch {
             val currentVersionCode = getCurrentVersionCode()
@@ -99,7 +107,7 @@ class MainActivity : AppCompatActivity() {
             if (release != null) {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("🚀 Mise à jour disponible (${release.tagName})")
-                    .setMessage("Une nouvelle version de Xbox Video Caster est disponible sur GitHub. Voulez-vous la télécharger et l'installer automatiquement ?")
+                    .setMessage("Une nouvelle version de Xbox Video Caster est disponible. Voulez-vous la télécharger et l'installer automatiquement ?")
                     .setPositiveButton("Mettre à jour maintenant") { _, _ ->
                         startAutoUpdate(release.apkDownloadUrl)
                     }
@@ -153,7 +161,7 @@ class MainActivity : AppCompatActivity() {
             settings.mediaPlaybackRequiresUserGesture = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.userAgentString = VideoStreamSniffer.USER_AGENT
-            settings.setSupportMultipleWindows(false) // Bloque l'ouverture de popups publicitaires !
+            settings.setSupportMultipleWindows(false)
             settings.javaScriptCanOpenWindowsAutomatically = false
 
             addJavascriptInterface(object {
@@ -165,13 +173,13 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 @JavascriptInterface
-                fun onIframeDetected(iframeSrc: String) {
+                fun onIframeDetected(iframeSrc: String, pageReferer: String) {
                     if (iframeSrc.startsWith("http") && iframeSrc != currentIframeEmbedUrl) {
                         currentIframeEmbedUrl = iframeSrc
                         lifecycleScope.launch(Dispatchers.IO) {
                             val extracted = videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(
                                 iframeSrc,
-                                "https://anime-sama.to/"
+                                pageReferer.ifBlank { "https://anime-sama.to/" }
                             )
                             if (extracted != null) {
                                 onNewVideoStreamFound(extracted.first, extracted.second)
@@ -237,29 +245,38 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    injectSmartAnimeSamaWatcher()
+                    injectSmartSiteWatcher()
                 }
             }
         }
     }
 
-    private fun injectSmartAnimeSamaWatcher() {
+    /**
+     * Surveille les lecteurs sur Anime-Sama ET French Stream (fs26.lol)
+     */
+    private fun injectSmartSiteWatcher() {
         val js = """
             (function() {
                 if (window.__xboxWatcherInstalled) return;
                 window.__xboxWatcherInstalled = true;
 
+                // Nettoyer les blocs de pub et l'animation d'attente TV de French Stream / Anime-Sama
                 var style = document.createElement('style');
-                style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit { display: none !important; }';
+                style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit, #fss-tvload { display: none !important; } .nav-menu > li, .st-tabs span, .short, .sect-t, .container2 { opacity: 1 !important; }';
                 document.head.appendChild(style);
 
                 setInterval(function() {
                     try {
-                        var iframe = document.getElementById('playerDF') || document.querySelector('iframe[src*="embed"], iframe[src*="ansembed"], iframe[src*="vidmoly"], iframe[src*="sendvid"], iframe[src*="minochinos"]');
-                        if (iframe && iframe.src && iframe.src.startsWith('http')) {
-                            XboxBridge.onIframeDetected(iframe.src);
+                        // 1. Surveiller les iframes de lecteurs (Anime-Sama #playerDF et French Stream #main-player / #seriePlayer / .iframe-container)
+                        var iframes = document.querySelectorAll('#playerDF, #main-player iframe, #seriePlayer iframe, .iframe-container iframe, iframe[src*="embed"], iframe[src*="ansembed"], iframe[src*="vidmoly"], iframe[src*="sendvid"], iframe[src*="minochinos"], iframe[src*="uqload"], iframe[src*="dood"], iframe[src*="voe"], iframe[src*="luluvdo"]');
+                        for (var k = 0; k < iframes.length; k++) {
+                            var src = iframes[k].src;
+                            if (src && src.startsWith('http') && src.indexOf('google') === -1) {
+                                XboxBridge.onIframeDetected(src, window.location.href);
+                            }
                         }
 
+                        // 2. Surveiller les balises <video> directes
                         var vids = document.querySelectorAll('video, source');
                         for (var i = 0; i < vids.length; i++) {
                             var s = vids[i].src || vids[i].currentSrc;
@@ -278,14 +295,38 @@ class MainActivity : AppCompatActivity() {
         lastDetectedStreamUrl = streamUrl
         lastDetectedReferer = referer
         runOnUiThread {
-            updateStatus("✅ Flux vidéo prêt ! Appuyez sur le bouton vert pour caster.", isLoading = false)
+            updateStatus("✅ Flux vidéo détecté ! Appuyez sur LANCER SUR LA XBOX.", isLoading = false)
             binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
         }
     }
 
     private fun setupListeners() {
+        // Bouton Accueil (Hub de choix des sites)
+        binding.btnHomeHub.setOnClickListener {
+            showHomeHub()
+        }
+
+        // Cartes du Hub de lancement
+        binding.cardSelectAnimeSama.setOnClickListener {
+            loadBrowserUrl(ANIME_SAMA_HOME)
+        }
+
+        binding.cardSelectFrenchStream.setOnClickListener {
+            loadBrowserUrl(FRENCH_STREAM_HOME)
+        }
+
+        binding.btnResumeLastPage.setOnClickListener {
+            val savedPage = prefs.getString(KEY_LAST_PAGE, ANIME_SAMA_HOME) ?: ANIME_SAMA_HOME
+            loadBrowserUrl(savedPage)
+        }
+
+        // Raccourcis de la barre supérieure
         binding.btnHomeAnimeSama.setOnClickListener {
             loadBrowserUrl(ANIME_SAMA_HOME)
+        }
+
+        binding.btnHomeFrenchStream.setOnClickListener {
+            loadBrowserUrl(FRENCH_STREAM_HOME)
         }
 
         binding.btnGoUrl.setOnClickListener {
@@ -325,7 +366,7 @@ class MainActivity : AppCompatActivity() {
 
             val targetUrl = currentIframeEmbedUrl ?: binding.webViewBrowser.url ?: binding.etVideoUrl.text.toString().trim()
             if (targetUrl.isBlank()) {
-                Toast.makeText(this, "Ouvrez d'abord une page vidéo", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Choisissez d'abord un film ou un épisode", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             startExtractionAndCast(targetUrl, ip)
@@ -349,11 +390,13 @@ class MainActivity : AppCompatActivity() {
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (binding.webViewBrowser.canGoBack()) {
-                    binding.webViewBrowser.goBack()
-                } else {
+                if (binding.layoutHomeHub.visibility == View.VISIBLE) {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
+                } else if (binding.webViewBrowser.canGoBack()) {
+                    binding.webViewBrowser.goBack()
+                } else {
+                    showHomeHub()
                 }
             }
         })
@@ -370,10 +413,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadBrowserUrl(url: String) {
+        binding.layoutHomeHub.visibility = View.GONE
         lastDetectedStreamUrl = null
         currentIframeEmbedUrl = null
         binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
-        updateStatus("Sélectionnez votre épisode sur la page...", isLoading = false)
+        updateStatus("Lancez la vidéo sur la page ou choisissez un épisode...", isLoading = false)
         binding.etVideoUrl.setText(url)
         binding.webViewBrowser.loadUrl(url)
     }
@@ -420,9 +464,10 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val iframeUrl = withContext(Dispatchers.Main) { currentIframeEmbedUrl }
+            val pageRef = withContext(Dispatchers.Main) { binding.webViewBrowser.url ?: "https://anime-sama.to/" }
             if (!iframeUrl.isNullOrBlank()) {
                 val extractedFromIframe = withContext(Dispatchers.IO) {
-                    videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(iframeUrl, "https://anime-sama.to/")
+                    videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(iframeUrl, pageRef)
                 }
                 if (extractedFromIframe != null) {
                     sendStreamToXbox(extractedFromIframe.first, extractedFromIframe.second, ip)
@@ -447,9 +492,8 @@ class MainActivity : AppCompatActivity() {
 
             override fun onError(message: String) {
                 runOnUiThread {
-                    updateStatus(message, isLoading = false)
+                    updateStatus("Appuyez une fois sur le bouton Play ▶ de la vidéo puis recliquez sur LANCER !", isLoading = false)
                     binding.btnCast.isEnabled = true
-                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
                 }
             }
         })
@@ -461,6 +505,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
+            // Le Proxy local convertit désormais le HLS (.m3u8) en flux continu MPEG-TS (.ts) natif pour la Xbox !
             val proxiedUrl = localStreamProxy.createProxyUrl(
                 realStreamUrl = rawStreamUrl,
                 referer = referer,
@@ -470,7 +515,7 @@ class MainActivity : AppCompatActivity() {
             val castResult = dlnaController.playMediaOnXbox(
                 ip = xboxIp,
                 videoUri = proxiedUrl,
-                title = "Anime-Sama / Xbox Stream"
+                title = "Xbox Video Stream"
             )
 
             castResult.onSuccess {
@@ -480,20 +525,13 @@ class MainActivity : AppCompatActivity() {
                 binding.btnStop.visibility = View.VISIBLE
                 Toast.makeText(this@MainActivity, "Lecture lancée sur la Xbox ! 🎮", Toast.LENGTH_LONG).show()
             }.onFailure { error ->
-                val directTry = dlnaController.playMediaOnXbox(ip = xboxIp, videoUri = rawStreamUrl)
-                if (directTry.isSuccess) {
-                    updateStatus(getString(R.string.status_playing), isLoading = false)
-                    binding.btnCast.isEnabled = true
-                    binding.btnStop.visibility = View.VISIBLE
-                } else {
-                    updateStatus("Erreur Xbox (${xboxIp}) : ${error.localizedMessage}", isLoading = false)
-                    binding.btnCast.isEnabled = true
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Erreur connexion Xbox : ${error.localizedMessage}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+                updateStatus("Erreur Xbox (${xboxIp}) : ${error.localizedMessage}", isLoading = false)
+                binding.btnCast.isEnabled = true
+                Toast.makeText(
+                    this@MainActivity,
+                    "Erreur connexion Xbox : ${error.localizedMessage}",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
