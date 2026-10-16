@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val ciVersionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 2
+val ciVersionName = "1.0.$ciVersionCode"
+
 android {
     namespace = "com.xboxvideocaster"
     compileSdk = 34
@@ -11,8 +14,8 @@ android {
         applicationId = "com.xboxvideocaster"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = ciVersionCode
+        versionName = ciVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
