@@ -4,7 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.View
@@ -18,6 +20,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -26,6 +29,7 @@ import com.xboxvideocaster.dlna.DlnaController
 import com.xboxvideocaster.dlna.LocalStreamProxy
 import com.xboxvideocaster.extractor.VideoStreamSniffer
 import com.xboxvideocaster.extractor.YouTubeExtractor
+import com.xboxvideocaster.updater.AppUpdater
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private val youtubeExtractor = YouTubeExtractor()
     private lateinit var videoStreamSniffer: VideoStreamSniffer
     private lateinit var localStreamProxy: LocalStreamProxy
+    private lateinit var appUpdater: AppUpdater
 
     @Volatile
     private var lastDetectedStreamUrl: String? = null
@@ -67,11 +72,13 @@ class MainActivity : AppCompatActivity() {
         videoStreamSniffer = VideoStreamSniffer(this)
         localStreamProxy = LocalStreamProxy(this)
         localStreamProxy.start()
+        appUpdater = AppUpdater(this)
 
         setupIpPersistence()
         setupBuiltInBrowser()
         setupListeners()
         setupBackNavigation()
+        checkAppUpdateAuto()
 
         if (!handleIncomingIntent(intent)) {
             val savedPage = prefs.getString(KEY_LAST_PAGE, ANIME_SAMA_HOME) ?: ANIME_SAMA_HOME
@@ -83,6 +90,54 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         intent?.let { handleIncomingIntent(it) }
+    }
+
+    private fun checkAppUpdateAuto() {
+        lifecycleScope.launch {
+            val currentVersionCode = getCurrentVersionCode()
+            val release = appUpdater.checkForUpdate(currentVersionCode)
+            if (release != null) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("🚀 Mise à jour disponible (${release.tagName})")
+                    .setMessage("Une nouvelle version de Xbox Video Caster est disponible sur GitHub. Voulez-vous la télécharger et l'installer automatiquement ?")
+                    .setPositiveButton("Mettre à jour maintenant") { _, _ ->
+                        startAutoUpdate(release.apkDownloadUrl)
+                    }
+                    .setNegativeButton("Plus tard", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun startAutoUpdate(apkUrl: String) {
+        updateStatus("Téléchargement de la mise à jour (0%)...", isLoading = true)
+        lifecycleScope.launch {
+            val res = appUpdater.downloadAndInstallApk(apkUrl) { progress ->
+                runOnUiThread {
+                    updateStatus("Téléchargement de la mise à jour ($progress%)...", isLoading = true)
+                }
+            }
+            res.onSuccess {
+                updateStatus("Installation de la mise à jour lancée !", isLoading = false)
+            }.onFailure { err ->
+                updateStatus("Erreur mise à jour : ${err.localizedMessage}", isLoading = false)
+                Toast.makeText(this@MainActivity, "Erreur MAJ : ${err.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun getCurrentVersionCode(): Int {
+        return try {
+            val pInfo = packageManager.getPackageInfo(packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                pInfo.longVersionCode.toInt()
+            } else {
+                @Suppress("DEPRECATION")
+                pInfo.versionCode
+            }
+        } catch (_: PackageManager.NameNotFoundException) {
+            1
+        }
     }
 
     private fun setupIpPersistence() {
@@ -113,7 +168,6 @@ class MainActivity : AppCompatActivity() {
                 fun onIframeDetected(iframeSrc: String) {
                     if (iframeSrc.startsWith("http") && iframeSrc != currentIframeEmbedUrl) {
                         currentIframeEmbedUrl = iframeSrc
-                        // Tenter en tâche de fond d'extraire directement le .m3u8 de ce lecteur !
                         lifecycleScope.launch(Dispatchers.IO) {
                             val extracted = videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(
                                 iframeSrc,
@@ -128,7 +182,6 @@ class MainActivity : AppCompatActivity() {
             }, "XboxBridge")
 
             webChromeClient = object : WebChromeClient() {
-                // Empêche les popups publicitaires de s'ouvrir
                 override fun onCreateWindow(
                     view: WebView?,
                     isDialog: Boolean,
@@ -146,7 +199,6 @@ class MainActivity : AppCompatActivity() {
                     request: WebResourceRequest?
                 ): Boolean {
                     val target = request?.url?.toString() ?: return false
-                    // Bloquer toute redirection vers un site de pub externe
                     if (VideoStreamSniffer.isAdUrl(target)) {
                         return true
                     }
@@ -159,7 +211,6 @@ class MainActivity : AppCompatActivity() {
                 ): WebResourceResponse? {
                     val reqUrl = request?.url?.toString() ?: return null
 
-                    // 1. Bloqueur de publicités ultra-strict
                     if (VideoStreamSniffer.isAdUrl(reqUrl)) {
                         return WebResourceResponse(
                             "text/plain",
@@ -168,7 +219,6 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
 
-                    // 2. Détection en temps réel de n'importe quel flux .m3u8 / .mp4 sur la page
                     if (VideoStreamSniffer.isVideoStreamUrl(reqUrl)) {
                         val ref = request.requestHeaders["Referer"] ?: lastDetectedReferer
                         onNewVideoStreamFound(reqUrl, ref)
@@ -193,30 +243,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Injecte un observateur JS qui surveille le changement d'épisode ou de lecteur sur Anime-Sama
-     * et supprime les bannières de pubs sur la page pour une navigation ultra propre.
-     */
     private fun injectSmartAnimeSamaWatcher() {
         val js = """
             (function() {
                 if (window.__xboxWatcherInstalled) return;
                 window.__xboxWatcherInstalled = true;
 
-                // Nettoyer les blocs de pub visuels d'Anime-Sama
                 var style = document.createElement('style');
                 style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit { display: none !important; }';
                 document.head.appendChild(style);
 
                 setInterval(function() {
                     try {
-                        // 1. Surveiller l'iframe #playerDF d'Anime-Sama quand on choisit un épisode
                         var iframe = document.getElementById('playerDF') || document.querySelector('iframe[src*="embed"], iframe[src*="ansembed"], iframe[src*="vidmoly"], iframe[src*="sendvid"], iframe[src*="minochinos"]');
                         if (iframe && iframe.src && iframe.src.startsWith('http')) {
                             XboxBridge.onIframeDetected(iframe.src);
                         }
 
-                        // 2. Surveiller les balises <video> directes
                         var vids = document.querySelectorAll('video, source');
                         for (var i = 0; i < vids.length; i++) {
                             var s = vids[i].src || vids[i].currentSrc;
@@ -274,14 +317,12 @@ class MainActivity : AppCompatActivity() {
             }
             prefs.edit().putString(KEY_XBOX_IP, ip).apply()
 
-            // Si un flux a déjà été détecté automatiquement pendant la navigation, l'envoyer immédiatement !
             val readyStream = lastDetectedStreamUrl
             if (!readyStream.isNullOrBlank()) {
                 sendStreamToXbox(readyStream, lastDetectedReferer, ip)
                 return@setOnClickListener
             }
 
-            // Sinon, extraire depuis la page actuelle ou l'iframe actif
             val targetUrl = currentIframeEmbedUrl ?: binding.webViewBrowser.url ?: binding.etVideoUrl.text.toString().trim()
             if (targetUrl.isBlank()) {
                 Toast.makeText(this, "Ouvrez d'abord une page vidéo", Toast.LENGTH_SHORT).show()
@@ -325,7 +366,6 @@ class MainActivity : AppCompatActivity() {
         if (input.contains(".") && !input.contains(" ")) {
             return "https://$input"
         }
-        // Si l'utilisateur tape juste "one piece", ouvrir le catalogue Anime-Sama
         return "https://anime-sama.to/catalogue/?search=${java.net.URLEncoder.encode(input, "UTF-8")}"
     }
 
@@ -363,7 +403,6 @@ class MainActivity : AppCompatActivity() {
         binding.btnCast.isEnabled = false
         updateStatus(getString(R.string.status_extracting), isLoading = true)
 
-        // 1. Cas YouTube
         if (youtubeExtractor.isYouTubeUrl(url)) {
             val videoId = youtubeExtractor.extractVideoId(url)
             if (videoId != null) {
@@ -379,9 +418,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. Extraction rapide intelligente (Anime-Sama episodes.js / lecteur Vidmoly / Sendvid / etc.)
         lifecycleScope.launch {
-            // Vérifier d'abord si la WebView a un iframe de lecteur actif
             val iframeUrl = withContext(Dispatchers.Main) { currentIframeEmbedUrl }
             if (!iframeUrl.isNullOrBlank()) {
                 val extractedFromIframe = withContext(Dispatchers.IO) {
@@ -424,7 +461,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
-            // Passer par notre Proxy local sur le téléphone pour que la Xbox n'ait jamais d'erreur 403 / Referer !
             val proxiedUrl = localStreamProxy.createProxyUrl(
                 realStreamUrl = rawStreamUrl,
                 referer = referer,
@@ -444,7 +480,6 @@ class MainActivity : AppCompatActivity() {
                 binding.btnStop.visibility = View.VISIBLE
                 Toast.makeText(this@MainActivity, "Lecture lancée sur la Xbox ! 🎮", Toast.LENGTH_LONG).show()
             }.onFailure { error ->
-                // En cas d'échec avec l'URL proxy, tenter l'URL directe en secours
                 val directTry = dlnaController.playMediaOnXbox(ip = xboxIp, videoUri = rawStreamUrl)
                 if (directTry.isSuccess) {
                     updateStatus(getString(R.string.status_playing), isLoading = false)
