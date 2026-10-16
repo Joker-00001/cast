@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,30 +22,6 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Prepare Gradle & Manifest
-        run: |
-          cat << 'EOF' > settings.gradle.kts
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "XboxVideoCaster"
-          include(":app")
-          EOF
-
-          sed -i 's/android:icon="@mipmap\/ic_launcher"/android:icon="@android:drawable\/ic_media_play"/g' app/src/main/AndroidManifest.xml
-          sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' app/src/main/AndroidManifest.xml
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -50,11 +29,25 @@ jobs:
           cache-disabled: true
 
       - name: Build Debug APK
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
         run: gradle assembleDebug --stacktrace
+
+      - name: Rename APK for direct download
+        run: cp app/build/outputs/apk/debug/app-debug.apk XboxVideoCaster.apk
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: XboxVideoCaster-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: XboxVideoCaster.apk
           retention-days: 14
+
+      - name: Publish GitHub Release for Auto-Update
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: "Xbox Video Caster v1.0.${{ github.run_number }}"
+          body: "Mise à jour automatique générée par GitHub Actions (Build #${{ github.run_number }})."
+          files: XboxVideoCaster.apk
+          prerelease: false
