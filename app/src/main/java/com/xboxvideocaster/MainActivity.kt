@@ -31,6 +31,9 @@ import com.xboxvideocaster.extractor.VideoStreamSniffer
 import com.xboxvideocaster.extractor.YouTubeExtractor
 import com.xboxvideocaster.updater.AppUpdater
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
@@ -54,6 +57,13 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var currentIframeEmbedUrl: String? = null
+
+    // État de la lecture en cours sur la Xbox pour la télécommande (-30s / Pause / +30s)
+    private var activePreparedStream: LocalStreamProxy.PreparedStream? = null
+    private var currentBaseOffsetSec: Int = 0
+    private var currentXboxRelSec: Int = 0
+    private var isXboxPaused: Boolean = false
+    private var positionTrackerJob: Job? = null
 
     companion object {
         private const val PREFS_NAME = "xbox_caster_prefs"
@@ -81,7 +91,6 @@ class MainActivity : AppCompatActivity() {
         setupBackNavigation()
         checkAppUpdateAuto()
 
-        // Si un lien est partagé depuis une autre app, l'ouvrir directement, sinon afficher le Hub de choix de site
         if (!handleIncomingIntent(intent)) {
             showHomeHub()
         }
@@ -97,7 +106,9 @@ class MainActivity : AppCompatActivity() {
         binding.layoutHomeHub.visibility = View.VISIBLE
         val savedPage = prefs.getString(KEY_LAST_PAGE, null)
         binding.btnResumeLastPage.visibility = if (savedPage.isNullOrBlank()) View.GONE else View.VISIBLE
-        updateStatus("Choisissez une plateforme ci-dessus", isLoading = false)
+        if (activePreparedStream == null) {
+            updateStatus("Choisissez une plateforme ci-dessus", isLoading = false)
+        }
     }
 
     private fun checkAppUpdateAuto() {
@@ -207,7 +218,8 @@ class MainActivity : AppCompatActivity() {
                     request: WebResourceRequest?
                 ): Boolean {
                     val target = request?.url?.toString() ?: return false
-                    if (VideoStreamSniffer.isAdUrl(target)) {
+                    // Bloquer strictement toute redirection hors des domaines de streaming légitimes !
+                    if (!VideoStreamSniffer.isNavigationAllowed(target)) {
                         return true
                     }
                     return false
@@ -241,6 +253,8 @@ class MainActivity : AppCompatActivity() {
                         binding.etVideoUrl.setText(url)
                         prefs.edit().putString(KEY_LAST_PAGE, url).apply()
                     }
+                    // Désactiver window.open dès le début du chargement
+                    view?.evaluateJavascript("window.open = function(){ return null; };", null)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -251,23 +265,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Surveille les lecteurs sur Anime-Sama ET French Stream (fs26.lol)
-     */
     private fun injectSmartSiteWatcher() {
         val js = """
             (function() {
+                window.open = function() { return null; };
                 if (window.__xboxWatcherInstalled) return;
                 window.__xboxWatcherInstalled = true;
 
-                // Nettoyer les blocs de pub et l'animation d'attente TV de French Stream / Anime-Sama
                 var style = document.createElement('style');
-                style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit, #fss-tvload { display: none !important; } .nav-menu > li, .st-tabs span, .short, .sect-t, .container2 { opacity: 1 !important; }';
+                style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit, #fss-tvload, .adsbygoogle, [id*="ad-"], [class*="ad-"], [id*="pub"], iframe[src*="ads"] { display: none !important; pointer-events: none !important; } .nav-menu > li, .st-tabs span, .short, .sect-t, .container2 { opacity: 1 !important; }';
                 document.head.appendChild(style);
 
                 setInterval(function() {
                     try {
-                        // 1. Surveiller les iframes de lecteurs (Anime-Sama #playerDF et French Stream #main-player / #seriePlayer / .iframe-container)
+                        window.open = function() { return null; };
+
+                        // 1. Détruire les calques transparents invisibles de pub (French Stream / Vidmoly / Minochinos)
+                        var allDivs = document.querySelectorAll('div, a, aside');
+                        for (var d = 0; d < allDivs.length; d++) {
+                            var el = allDivs[d];
+                            var st = window.getComputedStyle(el);
+                            var z = parseInt(st.zIndex, 10) || 0;
+                            if ((st.position === 'fixed' || st.position === 'absolute') && z > 99999 && el.id !== 'loginModal') {
+                                el.remove();
+                            }
+                        }
+
+                        // 2. Surveiller les iframes de lecteurs
                         var iframes = document.querySelectorAll('#playerDF, #main-player iframe, #seriePlayer iframe, .iframe-container iframe, iframe[src*="embed"], iframe[src*="ansembed"], iframe[src*="vidmoly"], iframe[src*="sendvid"], iframe[src*="minochinos"], iframe[src*="uqload"], iframe[src*="dood"], iframe[src*="voe"], iframe[src*="luluvdo"]');
                         for (var k = 0; k < iframes.length; k++) {
                             var src = iframes[k].src;
@@ -276,7 +300,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
 
-                        // 2. Surveiller les balises <video> directes
+                        // 3. Surveiller les balises <video> directes
                         var vids = document.querySelectorAll('video, source');
                         for (var i = 0; i < vids.length; i++) {
                             var s = vids[i].src || vids[i].currentSrc;
@@ -285,7 +309,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     } catch (e) {}
-                }, 1200);
+                }, 1000);
             })();
         """.trimIndent()
         binding.webViewBrowser.evaluateJavascript(js, null)
@@ -295,18 +319,18 @@ class MainActivity : AppCompatActivity() {
         lastDetectedStreamUrl = streamUrl
         lastDetectedReferer = referer
         runOnUiThread {
-            updateStatus("✅ Flux vidéo détecté ! Appuyez sur LANCER SUR LA XBOX.", isLoading = false)
-            binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
+            if (activePreparedStream == null) {
+                updateStatus("✅ Flux vidéo détecté ! Appuyez sur LANCER SUR LA XBOX.", isLoading = false)
+                binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
+            }
         }
     }
 
     private fun setupListeners() {
-        // Bouton Accueil (Hub de choix des sites)
         binding.btnHomeHub.setOnClickListener {
             showHomeHub()
         }
 
-        // Cartes du Hub de lancement
         binding.cardSelectAnimeSama.setOnClickListener {
             loadBrowserUrl(ANIME_SAMA_HOME)
         }
@@ -320,7 +344,6 @@ class MainActivity : AppCompatActivity() {
             loadBrowserUrl(savedPage)
         }
 
-        // Raccourcis de la barre supérieure
         binding.btnHomeAnimeSama.setOnClickListener {
             loadBrowserUrl(ANIME_SAMA_HOME)
         }
@@ -350,6 +373,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Bouton principal LANCER SUR LA XBOX
         binding.btnCast.setOnClickListener {
             val ip = binding.etXboxIp.text?.toString()?.trim() ?: ""
             if (ip.isBlank()) {
@@ -372,19 +396,132 @@ class MainActivity : AppCompatActivity() {
             startExtractionAndCast(targetUrl, ip)
         }
 
-        binding.btnStop.setOnClickListener {
-            val ip = binding.etXboxIp.text?.toString()?.trim() ?: ""
-            if (ip.isNotBlank()) {
-                lifecycleScope.launch {
-                    val result = dlnaController.stopMedia(ip)
-                    if (result.isSuccess) {
-                        updateStatus("Lecture arrêtée sur la Xbox", isLoading = false)
-                        binding.btnStop.visibility = View.GONE
-                        Toast.makeText(this@MainActivity, "Lecture arrêtée", Toast.LENGTH_SHORT).show()
+        // --- Télécommande : Pause / Play ---
+        binding.btnPlayPause.setOnClickListener {
+            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
+            lifecycleScope.launch {
+                if (isXboxPaused) {
+                    val res = dlnaController.resumeMedia(ip)
+                    if (res.isSuccess) {
+                        isXboxPaused = false
+                        binding.btnPlayPause.text = "⏸ PAUSE"
+                        updateStatus("Lecture en cours sur la Xbox 🎮", isLoading = false)
+                    }
+                } else {
+                    val res = dlnaController.pauseMedia(ip)
+                    if (res.isSuccess) {
+                        isXboxPaused = true
+                        binding.btnPlayPause.text = "▶ PLAY"
+                        updateStatus("En pause sur la Xbox ⏸", isLoading = false)
                     }
                 }
             }
         }
+
+        // --- Télécommande : Reculer de 30s ---
+        binding.btnRewind30.setOnClickListener {
+            jumpBySeconds(-30)
+        }
+
+        // --- Télécommande : Avancer de 30s ---
+        binding.btnForward30.setOnClickListener {
+            jumpBySeconds(+30)
+        }
+
+        // --- Télécommande : Arrêter ---
+        binding.btnStop.setOnClickListener {
+            val ip = binding.etXboxIp.text?.toString()?.trim() ?: ""
+            if (ip.isNotBlank()) {
+                stopPositionTracker()
+                activePreparedStream = null
+                com.xboxvideocaster.dlna.CastForegroundService.stopService(this@MainActivity)
+                lifecycleScope.launch {
+                    dlnaController.stopMedia(ip)
+                    binding.layoutRemoteControls.visibility = View.GONE
+                    binding.tvTimer.visibility = View.GONE
+                    updateStatus("Lecture arrêtée sur la Xbox", isLoading = false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Saute de +30s ou -30s dans la vidéo en cours sur la Xbox
+     */
+    private fun jumpBySeconds(deltaSec: Int) {
+        val ip = binding.etXboxIp.text?.toString()?.trim() ?: return
+        val prepared = activePreparedStream ?: return
+
+        val currentTotalSec = currentBaseOffsetSec + currentXboxRelSec
+        val targetSec = (currentTotalSec + deltaSec).coerceIn(0, prepared.totalDurationSec - 5)
+
+        updateStatus("Saut à ${dlnaController.formatSecondsToHms(targetSec)}...", isLoading = true)
+
+        lifecycleScope.launch {
+            if (prepared.isHls && prepared.segments.isNotEmpty()) {
+                // Pour les flux HLS convertis en MPEG-TS, on génère l'URL qui démarre pile au segment cible !
+                val matchedSeg = prepared.segments.lastOrNull { it.startTimeSec <= targetSec }
+                val actualStartSec = matchedSeg?.startTimeSec?.toInt() ?: targetSec
+                currentBaseOffsetSec = actualStartSec
+                currentXboxRelSec = 0
+
+                val newStreamUrl = localStreamProxy.buildPlaybackUrl(prepared, actualStartSec)
+                val remainingDuration = (prepared.totalDurationSec - actualStartSec).coerceAtLeast(60)
+
+                val res = dlnaController.playMediaOnXbox(
+                    ip = ip,
+                    videoUri = newStreamUrl,
+                    title = "Xbox Video Stream",
+                    durationSeconds = remainingDuration
+                )
+                if (res.isSuccess) {
+                    isXboxPaused = false
+                    binding.btnPlayPause.text = "⏸ PAUSE"
+                    updateTimerDisplay()
+                    updateStatus("Lecture en cours sur la Xbox 🎮", isLoading = false)
+                } else {
+                    updateStatus("Erreur lors du saut : ${res.exceptionOrNull()?.localizedMessage}", isLoading = false)
+                }
+            } else {
+                // Pour les flux MP4 directs, utiliser l'action UPnP Seek REL_TIME
+                val seekRes = dlnaController.seekMedia(ip, targetSec)
+                if (seekRes.isSuccess) {
+                    currentXboxRelSec = targetSec
+                    updateTimerDisplay()
+                    updateStatus("Lecture en cours sur la Xbox 🎮", isLoading = false)
+                }
+            }
+        }
+    }
+
+    private fun startPositionTracker(xboxIp: String) {
+        stopPositionTracker()
+        binding.tvTimer.visibility = View.VISIBLE
+        positionTrackerJob = lifecycleScope.launch {
+            while (isActive && activePreparedStream != null) {
+                if (!isXboxPaused) {
+                    val rel = dlnaController.getElapsedSeconds(xboxIp)
+                    if (rel >= 0) {
+                        currentXboxRelSec = rel
+                        updateTimerDisplay()
+                    }
+                }
+                delay(2000)
+            }
+        }
+    }
+
+    private fun stopPositionTracker() {
+        positionTrackerJob?.cancel()
+        positionTrackerJob = null
+    }
+
+    private fun updateTimerDisplay() {
+        val prepared = activePreparedStream ?: return
+        val currentTotal = currentBaseOffsetSec + currentXboxRelSec
+        val currentStr = dlnaController.formatSecondsToHms(currentTotal)
+        val totalStr = dlnaController.formatSecondsToHms(prepared.totalDurationSec)
+        binding.tvTimer.text = "$currentStr / $totalStr"
     }
 
     private fun setupBackNavigation() {
@@ -416,8 +553,10 @@ class MainActivity : AppCompatActivity() {
         binding.layoutHomeHub.visibility = View.GONE
         lastDetectedStreamUrl = null
         currentIframeEmbedUrl = null
-        binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
-        updateStatus("Lancez la vidéo sur la page ou choisissez un épisode...", isLoading = false)
+        if (activePreparedStream == null) {
+            binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+            updateStatus("Lancez la vidéo sur la page ou choisissez un épisode...", isLoading = false)
+        }
         binding.etVideoUrl.setText(url)
         binding.webViewBrowser.loadUrl(url)
     }
@@ -501,29 +640,41 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendStreamToXbox(rawStreamUrl: String, referer: String, xboxIp: String) {
         runOnUiThread {
-            updateStatus(getString(R.string.status_sending), isLoading = true)
+            updateStatus("Préparation du cache anti-freeze & envoi à la Xbox...", isLoading = true)
         }
 
         lifecycleScope.launch {
-            // Le Proxy local convertit désormais le HLS (.m3u8) en flux continu MPEG-TS (.ts) natif pour la Xbox !
-            val proxiedUrl = localStreamProxy.createProxyUrl(
-                realStreamUrl = rawStreamUrl,
-                referer = referer,
-                userAgent = VideoStreamSniffer.USER_AGENT
-            )
+            val prepared = withContext(Dispatchers.IO) {
+                localStreamProxy.prepareStream(
+                    realStreamUrl = rawStreamUrl,
+                    referer = referer,
+                    userAgent = VideoStreamSniffer.USER_AGENT
+                )
+            }
+
+            activePreparedStream = prepared
+            currentBaseOffsetSec = 0
+            currentXboxRelSec = 0
+            isXboxPaused = false
+
+            val proxiedUrl = localStreamProxy.buildPlaybackUrl(prepared, startSeconds = 0)
 
             val castResult = dlnaController.playMediaOnXbox(
                 ip = xboxIp,
                 videoUri = proxiedUrl,
-                title = "Xbox Video Stream"
+                title = "Xbox Video Stream",
+                durationSeconds = prepared.totalDurationSec
             )
 
             castResult.onSuccess {
+                com.xboxvideocaster.dlna.CastForegroundService.startService(this@MainActivity)
                 updateStatus(getString(R.string.status_playing), isLoading = false)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))
                 binding.btnCast.isEnabled = true
-                binding.btnStop.visibility = View.VISIBLE
-                Toast.makeText(this@MainActivity, "Lecture lancée sur la Xbox ! 🎮", Toast.LENGTH_LONG).show()
+                binding.btnPlayPause.text = "⏸ PAUSE"
+                binding.layoutRemoteControls.visibility = View.VISIBLE
+                startPositionTracker(xboxIp)
+                Toast.makeText(this@MainActivity, "Lecture lancée sur la Xbox ! 🎮", Toast.LENGTH_SHORT).show()
             }.onFailure { error ->
                 updateStatus("Erreur Xbox (${xboxIp}) : ${error.localizedMessage}", isLoading = false)
                 binding.btnCast.isEnabled = true
@@ -542,8 +693,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        stopPositionTracker()
         videoStreamSniffer.cleanup()
-        localStreamProxy.stop()
+        if (isFinishing && activePreparedStream == null) {
+            localStreamProxy.stop()
+            com.xboxvideocaster.dlna.CastForegroundService.stopService(this)
+        }
         super.onDestroy()
     }
 }

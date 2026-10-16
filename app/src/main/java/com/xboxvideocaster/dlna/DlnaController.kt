@@ -10,6 +10,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
@@ -22,7 +23,6 @@ class DlnaController(
 ) {
 
     companion object {
-        // Endpoint réel découvert sur votre Xbox (192.168.1.52:2869)
         private const val DEFAULT_XBOX_PORT = 2869
         private const val DEFAULT_XBOX_CONTROL_PATH =
             "/upnphost/udhisapi.dll?control=uuid:263ceedd-cc6e-416f-b916-1f43eada8031+urn:upnp-org:serviceId:AVTransport"
@@ -32,17 +32,12 @@ class DlnaController(
     @Volatile
     private var cachedControlUrl: String? = null
 
-    /**
-     * Découvre dynamiquement l'URL de contrôle AVTransport de la Xbox sur le réseau
-     * ou utilise directement l'endpoint Xbox One / Series port 2869.
-     */
     suspend fun resolveXboxControlUrl(ip: String): String = withContext(Dispatchers.IO) {
         val currentCache = cachedControlUrl
         if (currentCache != null && currentCache.contains(ip)) {
             return@withContext currentCache
         }
 
-        // 1. Tenter la découverte SSDP rapide (1.5s max) ciblée sur AVTransport:1
         val discoveredLocation = discoverAvTransportLocationViaSsdp(ip)
         if (discoveredLocation != null) {
             val parsedControlUrl = fetchControlUrlFromDescriptionXml(discoveredLocation)
@@ -52,7 +47,6 @@ class DlnaController(
             }
         }
 
-        // 2. Fallback direct sur l'endpoint exact de votre Xbox (Port 2869)
         val fallback = "http://$ip:$DEFAULT_XBOX_PORT$DEFAULT_XBOX_CONTROL_PATH"
         cachedControlUrl = fallback
         fallback
@@ -103,7 +97,6 @@ class DlnaController(
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val xml = resp.body?.string() ?: return null
-                // Extraire le bloc service AVTransport:1 et son <controlURL>
                 val avIndex = xml.indexOf("urn:schemas-upnp-org:service:AVTransport:1")
                 if (avIndex != -1) {
                     val sub = xml.substring(avIndex)
@@ -126,33 +119,34 @@ class DlnaController(
     }
 
     /**
-     * Envoie la commande SetAVTransportURI puis Play à la console Xbox via SOAP / UPnP AVTransport
+     * Envoie la commande SetAVTransportURI (avec la durée exacte de la vidéo pour éviter le clignotement de l'OSD Xbox)
+     * suivie de Play.
      */
     suspend fun playMediaOnXbox(
         ip: String,
         videoUri: String,
-        title: String = "Xbox Video Stream"
+        title: String = "Xbox Video Stream",
+        durationSeconds: Int = 1440
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val controlUrl = resolveXboxControlUrl(ip)
             val escapedUri = escapeXml(videoUri)
             val escapedTitle = escapeXml(title)
+            val formattedDuration = formatSecondsToHms(durationSeconds)
 
             val protocolInfo = if (videoUri.endsWith(".ts", ignoreCase = true)) {
-                "http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+                "http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             } else {
                 "http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             }
 
-            // 1. Arrêter tout flux précédent proprement (optionnel, ignore l'erreur)
             try {
-                sendSoapAction(controlUrl, "Stop", """<InstanceID>0</InstanceID>""")
+                sendSoapAction(controlUrl, "Stop", "<InstanceID>0</InstanceID>")
             } catch (_: Exception) {
             }
 
-            // 2. SOAP XML SetAVTransportURI
             val didlLiteMetadata = escapeXml(
-                """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUri</res></item></DIDL-Lite>"""
+                """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res duration="$formattedDuration" protocolInfo="$protocolInfo">$escapedUri</res></item></DIDL-Lite>"""
             )
 
             val setUriArgs = """
@@ -163,7 +157,6 @@ class DlnaController(
 
             val setResult = sendSoapAction(controlUrl, "SetAVTransportURI", setUriArgs)
             if (setResult.isFailure) {
-                // Réessayer sans métadonnées DIDL-Lite si la Xbox préfère CurrentURIMetaData vide
                 val simpleArgs = """
                     <InstanceID>0</InstanceID>
                     <CurrentURI>$escapedUri</CurrentURI>
@@ -175,7 +168,6 @@ class DlnaController(
                 }
             }
 
-            // 3. SOAP XML Play
             val playArgs = """
                 <InstanceID>0</InstanceID>
                 <Speed>1</Speed>
@@ -184,6 +176,88 @@ class DlnaController(
             sendSoapAction(controlUrl, "Play", playArgs)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Met en pause la lecture sur la Xbox
+     */
+    suspend fun pauseMedia(ip: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val controlUrl = resolveXboxControlUrl(ip)
+            sendSoapAction(controlUrl, "Pause", "<InstanceID>0</InstanceID>")
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Reprend la lecture sur la Xbox
+     */
+    suspend fun resumeMedia(ip: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val controlUrl = resolveXboxControlUrl(ip)
+            val playArgs = """
+                <InstanceID>0</InstanceID>
+                <Speed>1</Speed>
+            """.trimIndent()
+            sendSoapAction(controlUrl, "Play", playArgs)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Saute à un moment précis (HH:MM:SS) via UPnP Seek REL_TIME
+     */
+    suspend fun seekMedia(ip: String, targetSeconds: Int): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val controlUrl = resolveXboxControlUrl(ip)
+            val targetHms = formatSecondsToHms(targetSeconds)
+            val seekArgs = """
+                <InstanceID>0</InstanceID>
+                <Unit>REL_TIME</Unit>
+                <Target>$targetHms</Target>
+            """.trimIndent()
+            sendSoapAction(controlUrl, "Seek", seekArgs)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Récupère le temps de lecture écoulé depuis le début du flux actuel (en secondes)
+     */
+    suspend fun getElapsedSeconds(ip: String): Int = withContext(Dispatchers.IO) {
+        try {
+            val controlUrl = resolveXboxControlUrl(ip)
+            val envelope = """<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:GetPositionInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+            <InstanceID>0</InstanceID>
+        </u:GetPositionInfo>
+    </s:Body>
+</s:Envelope>""".trimIndent()
+
+            val request = Request.Builder()
+                .url(controlUrl)
+                .addHeader("Content-Type", SOAP_MEDIA_TYPE)
+                .addHeader("SOAPACTION", "\"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo\"")
+                .post(envelope.toRequestBody(SOAP_MEDIA_TYPE.toMediaType()))
+                .build()
+
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext 0
+                val xml = resp.body?.string() ?: return@withContext 0
+                val m = Pattern.compile("<RelTime[^>]*>([^<]+)</RelTime>").matcher(xml)
+                if (m.find()) {
+                    return@withContext parseHmsToSeconds(m.group(1)?.trim() ?: "0:00:00")
+                }
+                0
+            }
+        } catch (_: Exception) {
+            0
         }
     }
 
@@ -223,6 +297,23 @@ class DlnaController(
             }
         }
         return Result.success(Unit)
+    }
+
+    fun formatSecondsToHms(totalSec: Int): String {
+        val safe = totalSec.coerceAtLeast(0)
+        val h = safe / 3600
+        val m = (safe % 3600) / 60
+        val s = safe % 60
+        return String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+    }
+
+    private fun parseHmsToSeconds(hms: String): Int {
+        val parts = hms.split(":")
+        if (parts.size != 3) return 0
+        val h = parts[0].toIntOrNull() ?: 0
+        val m = parts[1].toIntOrNull() ?: 0
+        val s = parts[2].substringBefore(".").toIntOrNull() ?: 0
+        return h * 3600 + m * 60 + s
     }
 
     private fun escapeXml(text: String): String {

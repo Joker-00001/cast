@@ -54,13 +54,37 @@ class VideoStreamSniffer(private val context: Context) {
             "popads", "popcash", "adcash", "acscdn", "doubleclick", "googlesyndication",
             "adnxs", "bidswitch", "trafficjunky", "propellerads", "exoclick",
             "adsterra", "yllix", "hilltopads", "clickadu", "onclickmega",
-            "histats", "llvpn.com", "kingdomparlor", "korbo.fr", "eneba.com",
-            "yandex.ru/metrika", "eblock.php"
+            "histats", "llvpn", "kingdomparlor", "korbo.fr", "eneba.com",
+            "yandex.ru/metrika", "eblock.php", "a-zzz.com", "btag.min.js",
+            "tsyndicate", "outbrain", "taboola", "mgid", "revcontent",
+            "admaven", "galaksion", "mondiad", "pushground", "richads",
+            "evadav", "rollerads", "bet365", "1xbet", "stake.com",
+            "casino", "chaturbate", "stripchat", "livejasmin", "jerkmate",
+            "bongacams", "myfreecams", "cam4", "brazzers", "pornhub",
+            "xvideos", "xnxx", "onlyfans", "aliexpr", "temu.com",
+            "shein.com", "opera.com/download", "vpn", "clearclean",
+            "adrecover", "adsco.re", "realsrv", " twinrdsyn", "onmarshtompor",
+            "alwingulla", "augresearch", "popunder", "poperblocker",
+            "/assets/jquery/ev-cus", "deskademeta.php", "cdn.vidmoly.me/vj"
+        )
+
+        val ALLOWED_NAVIGATION_DOMAINS = listOf(
+            "anime-sama.", "fs26.lol", "french-stream.", "french-manga.",
+            "ansembed.", "vidmoly.", "sendvid.", "sibnet.", "minochinos.",
+            "morencius.", "embed4me.", "uqload.", "dood", "voe.", "luluvdo.",
+            "vidoza.", "upstream.", "streamtape.", "filemoon.", "wish",
+            "youtube.com", "youtu.be", "google.com"
         )
 
         fun isAdUrl(url: String): Boolean {
             val lower = url.lowercase(Locale.ROOT)
             return AD_KEYWORDS.any { lower.contains(it) }
+        }
+
+        fun isNavigationAllowed(targetUrl: String): Boolean {
+            val lower = targetUrl.lowercase(Locale.ROOT)
+            if (isAdUrl(lower)) return false
+            return ALLOWED_NAVIGATION_DOMAINS.any { lower.contains(it) }
         }
 
         fun isVideoStreamUrl(url: String): Boolean {

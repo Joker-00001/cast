@@ -18,7 +18,7 @@
         android:paddingBottom="8dp"
         app:layout_constraintTop_toTopOf="parent">
 
-        <!-- Row 1: Title + Accueil Button + Xbox IP Input + Stop Button -->
+        <!-- Row 1: Title + Accueil Button + Xbox IP Input -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -61,7 +61,7 @@
 
             <EditText
                 android:id="@+id/etXboxIp"
-                android:layout_width="120dp"
+                android:layout_width="125dp"
                 android:layout_height="34dp"
                 android:background="@drawable/bg_input_field"
                 android:gravity="center"
@@ -73,22 +73,6 @@
                 android:textColor="@color/white"
                 android:textColorHint="@color/text_secondary"
                 android:textSize="12sp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnStop"
-                style="@style/Widget.Material3.Button.TextButton"
-                android:layout_width="wrap_content"
-                android:layout_height="34dp"
-                android:layout_marginStart="4dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="6dp"
-                android:text="STOP"
-                android:textColor="@color/accent_red"
-                android:textSize="11sp"
-                android:textStyle="bold"
-                android:visibility="gone" />
         </LinearLayout>
 
         <!-- Row 2: Quick Site Shortcuts + URL Bar -->
@@ -322,7 +306,7 @@
 
     </LinearLayout>
 
-    <!-- Bottom Dynamic Status & Cast Bar -->
+    <!-- Bottom Dynamic Status, Remote Control & Cast Bar -->
     <LinearLayout
         android:id="@+id/bottomCastBar"
         android:layout_width="match_parent"
@@ -331,20 +315,21 @@
         android:elevation="12dp"
         android:gravity="center_vertical"
         android:orientation="vertical"
-        android:padding="12dp"
+        android:padding="10dp"
         app:layout_constraintBottom_toBottomOf="parent">
 
+        <!-- Status & Timer Row -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingBottom="8dp">
+            android:paddingBottom="6dp">
 
             <ProgressBar
                 android:id="@+id/progressBar"
-                android:layout_width="18dp"
-                android:layout_height="18dp"
+                android:layout_width="16dp"
+                android:layout_height="16dp"
                 android:layout_marginEnd="8dp"
                 android:indeterminateTint="@color/xbox_green"
                 android:visibility="gone" />
@@ -355,20 +340,110 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:ellipsize="end"
-                android:maxLines="2"
+                android:maxLines="1"
                 android:text="Choisissez un site pour commencer"
                 android:textColor="@color/text_secondary"
-                android:textSize="13sp" />
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvTimer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="0:00:00"
+                android:textColor="@color/white"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
         </LinearLayout>
 
+        <!-- Télécommande Xbox (Affichée pendant la lecture) -->
+        <LinearLayout
+            android:id="@+id/layoutRemoteControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRewind30"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:backgroundTint="#2B303B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                android:text="⏪ -30s"
+                android:textColor="@color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                app:cornerRadius="10dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnPlayPause"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1.2"
+                android:backgroundTint="#1E293B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                android:text="⏸ PAUSE"
+                android:textColor="#38BDF8"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                app:cornerRadius="10dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnForward30"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="6dp"
+                android:layout_weight="1"
+                android:backgroundTint="#2B303B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                android:text="+30s ⏩"
+                android:textColor="@color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                app:cornerRadius="10dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnStop"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:backgroundTint="#3B1818"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="56dp"
+                android:paddingHorizontal="10dp"
+                android:text="⏹"
+                android:textColor="@color/accent_red"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                app:cornerRadius="10dp" />
+        </LinearLayout>
+
+        <!-- Bouton principal de lancement -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnCast"
             android:layout_width="match_parent"
-            android:layout_height="54dp"
+            android:layout_height="50dp"
             android:backgroundTint="@color/xbox_green"
             android:text="📺 LANCER SUR LA XBOX"
             android:textColor="@color/white"
-            android:textSize="15sp"
+            android:textSize="14sp"
             android:textStyle="bold"
             app:cornerRadius="12dp" />
     </LinearLayout>
