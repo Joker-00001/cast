@@ -19,10 +19,35 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Prepare Gradle & Manifest
+        run: |
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "XboxVideoCaster"
+          include(":app")
+          EOF
+
+          sed -i 's/android:icon="@mipmap\/ic_launcher"/android:icon="@android:drawable\/ic_media_play"/g' app/src/main/AndroidManifest.xml
+          sed -i 's/android:roundIcon="@mipmap\/ic_launcher_round"//g' app/src/main/AndroidManifest.xml
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.6'
+          gradle-version: '8.7'
+          cache-disabled: true
 
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
