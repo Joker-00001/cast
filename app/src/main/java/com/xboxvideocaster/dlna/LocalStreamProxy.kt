@@ -71,7 +71,8 @@ class LocalStreamProxy(private val context: Context) {
         val isHls: Boolean,
         val segments: List<SegmentItem>,
         val totalDurationSec: Int,
-        @Volatile var lastServedSegmentIdx: Int = 0
+        @Volatile var lastServedSegmentIdx: Int = 0,
+        @Volatile var lastSeekOrStartWallMs: Long = System.currentTimeMillis()
     )
 
     private val httpClient = OkHttpClient.Builder()
@@ -160,7 +161,9 @@ class LocalStreamProxy(private val context: Context) {
             userAgent = ua,
             isHls = isHls,
             segments = segments,
-            totalDurationSec = if (totalDuration > 0) totalDuration else 1440
+            totalDurationSec = if (totalDuration > 0) totalDuration else 1440,
+            lastServedSegmentIdx = 0,
+            lastSeekOrStartWallMs = System.currentTimeMillis()
         )
         streamRegistry[id] = prepared
 
@@ -187,6 +190,7 @@ class LocalStreamProxy(private val context: Context) {
         if (!prepared.isHls || prepared.segments.isEmpty()) return targetSec
         val startIndex = prepared.segments.indexOfLast { it.startTimeSec <= targetSec }.coerceAtLeast(0)
         prepared.lastServedSegmentIdx = startIndex
+        prepared.lastSeekOrStartWallMs = System.currentTimeMillis()
         triggerPrefetch(prepared, startIndex, 3)
         try {
             ensureSegmentDownload(
@@ -330,8 +334,8 @@ class LocalStreamProxy(private val context: Context) {
 
     /**
      * Envoie les segments MPEG-TS en continu avec :
-     * - Régulation intelligente du débit Wi-Fi (évite que le téléchargement en parallèle ne sature l'antenne Wi-Fi
-     *   du téléphone et ne provoque "Signal faible" sur la Smart TV !)
+     * - Anti-rollback : si la Smart TV se reconnecte en cours de film (même sans header Range à cause de DLNA.ORG_OP=00),
+     *   reprend automatiquement au segment où la TV s'était arrêtée au lieu de repartir au début !
      * - DLNA.ORG_OP=00 sans DLNA.ORG_PN strict (accepte l'audio AAC 32 kHz d'Anime-Sama sans reset sur Xbox)
      * - Filtrage des paquets illégaux (AFC=3, alen=183) et continuité stricte des compteurs CC MPEG-TS !
      */
@@ -359,10 +363,14 @@ class LocalStreamProxy(private val context: Context) {
         if (segments.isEmpty()) return
 
         var startIndex = segments.indexOfLast { it.startTimeSec <= startSec }.coerceAtLeast(0)
-        // Si la Smart TV tente de se reconnecter en cours de lecture avec un header Range non nul,
-        // reprendre directement au segment en cours au lieu de repartir à 0:00
-        if (rangeHeader != null && !rangeHeader.startsWith("bytes=0-") && prepared.lastServedSegmentIdx > startIndex) {
-            startIndex = prepared.lastServedSegmentIdx
+        val elapsedSinceSeekOrStartMs = System.currentTimeMillis() - prepared.lastSeekOrStartWallMs
+        // Si la Smart TV se reconnecte plus de 12s après le démarrage ou le dernier saut (suite à une micro-coupure Wi-Fi),
+        // reprendre directement au segment en cours (même si la TV n'envoie pas de header Range à cause de DLNA.ORG_OP=00)
+        // -> élimine définitivement le rollback de 5 minutes en arrière !
+        if ((elapsedSinceSeekOrStartMs > 12_000L || (rangeHeader != null && !rangeHeader.startsWith("bytes=0-"))) &&
+            prepared.lastServedSegmentIdx > startIndex + 1
+        ) {
+            startIndex = (prepared.lastServedSegmentIdx - 1).coerceAtLeast(startIndex)
         }
 
         // Table des Continuity Counters (CC 0..15) par PID pour un flux MPEG-TS 100% continu sans coupure

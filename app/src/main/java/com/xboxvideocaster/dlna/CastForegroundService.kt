@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -17,15 +20,23 @@ import com.xboxvideocaster.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.net.InetAddress
+import kotlin.concurrent.thread
 
 /**
- * Service Android de premier plan (Foreground Service) avec WakeLock et WifiLock.
- * Reste actif dans la barre de notification même si l'application est fermée ou balayée des applications récentes.
+ * Service Android de premier plan (Foreground Service) avec :
+ * 1. WakeLock CPU + WifiLock (WIFI_MODE_FULL_HIGH_PERF).
+ * 2. Piste AudioTrack 100% silencieuse (PCM 0) en boucle : empêche Android (Samsung OneUI, Xiaomi MIUI, Doze Mode)
+ *    de couper le Wi-Fi ou de geler l'application au bout de 5 minutes quand l'écran du téléphone est en veille !
+ * 3. Ping Wi-Fi actif toutes les 10s vers la TV / Xbox pour maintenir l'antenne Wi-Fi éveillée en continu.
  */
 class CastForegroundService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var silentAudioTrack: AudioTrack? = null
+    @Volatile
+    private var keepAliveThreadRunning = false
     private var currentDeviceIp: String = "192.168.1.52"
     private var currentDeviceName: String = "Xbox / TV"
 
@@ -63,6 +74,7 @@ class CastForegroundService : Service() {
         super.onCreate()
         createNotificationChannel()
         acquireLocks()
+        startSilentAudioAndWifiKeepAlive()
         // S'assurer que le serveur proxy reste démarré au niveau du processus
         LocalStreamProxy.getInstance(applicationContext).start()
     }
@@ -70,6 +82,7 @@ class CastForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP_CAST) {
             isCastActive = false
+            stopSilentAudioAndWifiKeepAlive()
             val ipToStop = currentDeviceIp
             CoroutineScope(Dispatchers.IO).launch {
                 try {
@@ -87,6 +100,7 @@ class CastForegroundService : Service() {
         intent?.getStringExtra(EXTRA_DEVICE_NAME)?.let { currentDeviceName = it }
 
         acquireLocks()
+        startSilentAudioAndWifiKeepAlive()
         LocalStreamProxy.getInstance(applicationContext).start()
 
         val notification = buildNotification()
@@ -100,6 +114,85 @@ class CastForegroundService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         return START_STICKY
+    }
+
+    /**
+     * Joue un flux PCM 100% silencieux (zéros, volume 0) et envoie un ping Wi-Fi vers la TV/Xbox
+     * pour qu'Android considère l'application comme un lecteur audio actif (comme Spotify)
+     * et ne mette JAMAIS la puce Wi-Fi en veille au bout de 5 minutes d'écran éteint !
+     */
+    private fun startSilentAudioAndWifiKeepAlive() {
+        if (keepAliveThreadRunning) return
+        keepAliveThreadRunning = true
+
+        thread(start = true, isDaemon = true, name = "CastStandbyKeepAlive") {
+            try {
+                val sampleRate = 8000
+                val minBuf = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                ).coerceAtLeast(sampleRate * 2)
+
+                val track = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBuf)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+
+                track.setVolume(0.0f)
+                track.play()
+                silentAudioTrack = track
+
+                val silenceBytes = ByteArray(sampleRate * 2) // 1 seconde de silence PCM
+                var tick = 0
+                while (keepAliveThreadRunning && isCastActive) {
+                    try {
+                        track.write(silenceBytes, 0, silenceBytes.size)
+                    } catch (_: Exception) {
+                    }
+                    tick++
+                    // Toutes les 8 secondes, réveiller la table ARP / Wi-Fi vers l'IP de la TV / Xbox
+                    if (tick % 8 == 0) {
+                        try {
+                            InetAddress.getByName(currentDeviceIp).isReachable(1500)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                try {
+                    silentAudioTrack?.stop()
+                    silentAudioTrack?.release()
+                } catch (_: Exception) {
+                }
+                silentAudioTrack = null
+                keepAliveThreadRunning = false
+            }
+        }
+    }
+
+    private fun stopSilentAudioAndWifiKeepAlive() {
+        keepAliveThreadRunning = false
+        try {
+            silentAudioTrack?.stop()
+            silentAudioTrack?.release()
+        } catch (_: Exception) {
+        }
+        silentAudioTrack = null
     }
 
     private fun buildNotification(): Notification {
@@ -142,6 +235,7 @@ class CastForegroundService : Service() {
         // la notification reste dans la barre de notif et la vidéo continue sur la TV / Xbox !
         if (isCastActive) {
             acquireLocks()
+            startSilentAudioAndWifiKeepAlive()
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             nm?.notify(NOTIFICATION_ID, buildNotification())
         }
@@ -198,6 +292,7 @@ class CastForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        stopSilentAudioAndWifiKeepAlive()
         releaseLocks()
         super.onDestroy()
     }

@@ -132,6 +132,18 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val pm = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                if (pm != null && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                    val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = android.net.Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                }
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun restoreActiveCastIfAny() {
