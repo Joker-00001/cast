@@ -690,21 +690,31 @@ class LocalStreamProxy(private val context: Context) {
     private fun pickBestVariantUrl(masterText: String, baseUri: URL): String? {
         val lines = masterText.lines()
         var bestUrl: String? = null
-        var bestBandwidth = -1L
+        var bestScore = -1L
+
+        val bwRegex = Regex("""\bBANDWIDTH=(\d+)""")
+        val resRegex = Regex("""\bRESOLUTION=(\d+)x(\d+)""")
 
         for (i in lines.indices) {
             val line = lines[i].trim()
             if (line.startsWith("#EXT-X-STREAM-INF")) {
-                val bw = line.substringAfter("BANDWIDTH=", "")
-                    .substringBefore(",")
-                    .trim()
-                    .toLongOrNull() ?: 0L
+                val bw = bwRegex.find(line)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                val resMatch = resRegex.find(line)
+                val pixels = if (resMatch != null) {
+                    val w = resMatch.groupValues[1].toLongOrNull() ?: 0L
+                    val h = resMatch.groupValues[2].toLongOrNull() ?: 0L
+                    w * h
+                } else {
+                    0L
+                }
+                val score = (pixels * 1000L) + bw
+
                 for (j in (i + 1) until lines.size) {
                     val next = lines[j].trim()
                     if (next.isNotEmpty() && !next.startsWith("#")) {
                         val candidate = resolveUrl(baseUri, next)
-                        if (bw > bestBandwidth || bestUrl == null) {
-                            bestBandwidth = bw
+                        if (score > bestScore || bestUrl == null) {
+                            bestScore = score
                             bestUrl = candidate
                         }
                         break
