@@ -178,7 +178,15 @@ class VideoStreamSniffer(private val context: Context) {
                 return@withContext Result.success(Pair(url, url))
             }
 
-            // 2. Est-ce une page de film/série French Stream (fs26.lol) ?
+            // 2. Est-ce une page d'épisode Anime-Sama (anime-sama.to) ?
+            if (url.contains("anime-sama.")) {
+                val asExtracted = tryExtractFromAnimeSamaPage(url)
+                if (asExtracted != null) {
+                    return@withContext Result.success(asExtracted)
+                }
+            }
+
+            // 3. Est-ce une page de film/série French Stream (fs26.lol) ?
             if (url.contains("fs26.") || url.contains("french-stream.")) {
                 val fsExtracted = tryExtractFromFrenchStreamPage(url)
                 if (fsExtracted != null) {
@@ -186,7 +194,7 @@ class VideoStreamSniffer(private val context: Context) {
                 }
             }
 
-            // 3. Est-ce directement une page de lecteur (fsvid, vidzy, ansembed, vidmoly, sendvid, sibnet...) ?
+            // 4. Est-ce directement une page de lecteur (fsvid, vidzy, ansembed, vidmoly, sendvid, sibnet...) ?
             val directFromEmbed = tryExtractDirectStreamFromEmbedHtml(url, url)
             if (directFromEmbed != null) {
                 return@withContext Result.success(directFromEmbed)
@@ -195,6 +203,48 @@ class VideoStreamSniffer(private val context: Context) {
             Result.failure(Exception("Passage à l'extraction dynamique WebView"))
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /**
+     * Sur Anime-Sama, récupère episodes.js et extrait en priorité absolue le flux HLS (ansembed.net / vidmoly)
+     * au lieu du Lecteur 1 par défaut (sendvid/sibnet en .mp4 bridé à 250k qui faisait clignoter le menu TV).
+     */
+    private fun tryExtractFromAnimeSamaPage(pageUrl: String): Pair<String, String>? {
+        return try {
+            val cleanBase = pageUrl.substringBefore("?").substringBefore("#").trimEnd('/')
+            val episodesJsUrl = "$cleanBase/episodes.js"
+            val req = Request.Builder()
+                .url(episodesJsUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", pageUrl)
+                .build()
+
+            val jsContent = httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string() ?: return null
+            }
+
+            val ansembedMatcher = Pattern.compile("""https?://ansembed\.net/embed-[^'"\s]+""").matcher(jsContent)
+            if (ansembedMatcher.find()) {
+                val embedUrl = ansembedMatcher.group(0)
+                if (!embedUrl.isNullOrBlank()) {
+                    val extracted = tryExtractDirectStreamFromEmbedHtml(embedUrl, pageUrl)
+                    if (extracted != null) return extracted
+                }
+            }
+
+            val vidmolyMatcher = Pattern.compile("""https?://vidmoly\.[a-z]+/embed-[^'"\s]+""").matcher(jsContent)
+            if (vidmolyMatcher.find()) {
+                val embedUrl = vidmolyMatcher.group(0)?.replace("vidmoly.to", "vidmoly.biz")?.replace("vidmoly.net", "vidmoly.biz")
+                if (!embedUrl.isNullOrBlank()) {
+                    val extracted = tryExtractDirectStreamFromEmbedHtml(embedUrl, pageUrl)
+                    if (extracted != null) return extracted
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
         }
     }
 

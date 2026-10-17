@@ -22,6 +22,12 @@ class DlnaController(
         .build()
 ) {
 
+    data class DiscoveredDevice(
+        val name: String,
+        val ip: String,
+        val controlUrl: String
+    )
+
     companion object {
         private const val DEFAULT_XBOX_PORT = 2869
         private const val DEFAULT_XBOX_CONTROL_PATH =
@@ -31,6 +37,144 @@ class DlnaController(
 
     @Volatile
     private var cachedControlUrl: String? = null
+
+    fun setPreferredControlUrl(controlUrl: String?) {
+        cachedControlUrl = controlUrl
+    }
+
+    /**
+     * Scanne le réseau Wi-Fi local pour détecter toutes les TV connectées (Samsung, LG, Sony, Philips, TCL, Android TV...)
+     * ainsi que les consoles Xbox One / Series X|S via SSDP Multicast + scan rapide du sous-réseau sur le port UPnP 2869.
+     */
+    suspend fun scanNetworkDevices(localWifiIp: String?): List<DiscoveredDevice> = withContext(Dispatchers.IO) {
+        val foundByIp = LinkedHashMap<String, DiscoveredDevice>()
+        val locationsToInspect = LinkedHashSet<Pair<String, String>>() // Pair(ip, locationUrl)
+
+        // 1. Découverte SSDP Multicast (MediaRenderer + AVTransport)
+        var socket: DatagramSocket? = null
+        try {
+            socket = DatagramSocket()
+            socket.soTimeout = 450
+            val ssdpAddress = InetAddress.getByName("239.255.255.250")
+            val targets = listOf(
+                "urn:schemas-upnp-org:service:AVTransport:1",
+                "urn:schemas-upnp-org:device:MediaRenderer:1"
+            )
+            for (st in targets) {
+                val msg = buildString {
+                    append("M-SEARCH * HTTP/1.1\r\n")
+                    append("HOST: 239.255.255.250:1900\r\n")
+                    append("MAN: \"ssdp:discover\"\r\n")
+                    append("MX: 1\r\n")
+                    append("ST: $st\r\n\r\n")
+                }.toByteArray(Charsets.US_ASCII)
+                socket.send(DatagramPacket(msg, msg.size, ssdpAddress, 1900))
+            }
+
+            val buf = ByteArray(4096)
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < 2000) {
+                try {
+                    val pkt = DatagramPacket(buf, buf.size)
+                    socket.receive(pkt)
+                    val senderIp = pkt.address.hostAddress ?: continue
+                    val respText = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
+                    val m = Pattern.compile("(?i)Location:\\s*(http://[^\\r\\n]+)").matcher(respText)
+                    if (m.find()) {
+                        val loc = m.group(1)?.trim() ?: continue
+                        locationsToInspect.add(Pair(senderIp, loc))
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: Exception) {
+        } finally {
+            socket?.close()
+        }
+
+        // 2. Inspecter chaque XML UPnP découvert par SSDP pour récupérer le vrai nom de la TV / Xbox et son controlURL
+        for ((ip, locUrl) in locationsToInspect) {
+            val device = parseDeviceFromDescriptionXml(ip, locUrl)
+            if (device != null) {
+                foundByIp[ip] = device
+            }
+        }
+
+        // 3. Scan rapide du sous-réseau Wi-Fi sur le port 2869 (au cas où la box Internet bloque le multicast UDP SSDP)
+        val prefix = localWifiIp?.substringBeforeLast(".", "") ?: ""
+        if (prefix.count { it == '.' } == 2) {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(32)
+            val futures = (1..254).map { host ->
+                val testIp = "$prefix.$host"
+                pool.submit(java.util.concurrent.Callable {
+                    if (foundByIp.containsKey(testIp) || testIp == localWifiIp) return@Callable null
+                    var tcp: java.net.Socket? = null
+                    try {
+                        tcp = java.net.Socket()
+                        tcp.connect(java.net.InetSocketAddress(testIp, DEFAULT_XBOX_PORT), 220)
+                        DiscoveredDevice(
+                            name = "Xbox / Appareil UPnP ($testIp)",
+                            ip = testIp,
+                            controlUrl = "http://$testIp:$DEFAULT_XBOX_PORT$DEFAULT_XBOX_CONTROL_PATH"
+                        )
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        try { tcp?.close() } catch (_: Exception) {}
+                    }
+                })
+            }
+            for (f in futures) {
+                try {
+                    val dev = f.get(400, TimeUnit.MILLISECONDS)
+                    if (dev != null && !foundByIp.containsKey(dev.ip)) {
+                        foundByIp[dev.ip] = dev
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            pool.shutdownNow()
+        }
+
+        foundByIp.values.toList()
+    }
+
+    private fun parseDeviceFromDescriptionXml(ip: String, locationUrl: String): DiscoveredDevice? {
+        return try {
+            val req = Request.Builder().url(locationUrl).build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val xml = resp.body?.string() ?: return null
+                val avIndex = xml.indexOf("urn:schemas-upnp-org:service:AVTransport:1")
+                if (avIndex == -1) return null
+
+                val sub = xml.substring(avIndex)
+                val ctrlMatcher = Pattern.compile("<controlURL>([^<]+)</controlURL>").matcher(sub)
+                if (!ctrlMatcher.find()) return null
+                val ctrlPath = ctrlMatcher.group(1)?.trim() ?: return null
+                val base = URL(locationUrl)
+                val fullCtrlUrl = if (ctrlPath.startsWith("http")) {
+                    ctrlPath
+                } else if (ctrlPath.startsWith("/")) {
+                    "${base.protocol}://${base.host}:${base.port}$ctrlPath"
+                } else {
+                    "${base.protocol}://${base.host}:${base.port}/${ctrlPath}"
+                }
+
+                val nameMatcher = Pattern.compile("<friendlyName>([^<]+)</friendlyName>").matcher(xml)
+                val rawName = if (nameMatcher.find()) nameMatcher.group(1)?.trim() else null
+                val displayName = if (!rawName.isNullOrBlank()) "$rawName ($ip)" else "TV / Xbox ($ip)"
+
+                DiscoveredDevice(
+                    name = displayName,
+                    ip = ip,
+                    controlUrl = fullCtrlUrl
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     suspend fun resolveXboxControlUrl(ip: String): String = withContext(Dispatchers.IO) {
         val currentCache = cachedControlUrl
@@ -92,30 +236,7 @@ class DlnaController(
     }
 
     private fun fetchControlUrlFromDescriptionXml(locationUrl: String): String? {
-        return try {
-            val req = Request.Builder().url(locationUrl).build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val xml = resp.body?.string() ?: return null
-                val avIndex = xml.indexOf("urn:schemas-upnp-org:service:AVTransport:1")
-                if (avIndex != -1) {
-                    val sub = xml.substring(avIndex)
-                    val ctrlMatcher = Pattern.compile("<controlURL>([^<]+)</controlURL>").matcher(sub)
-                    if (ctrlMatcher.find()) {
-                        val ctrlPath = ctrlMatcher.group(1)?.trim() ?: return null
-                        val base = URL(locationUrl)
-                        return if (ctrlPath.startsWith("http")) {
-                            ctrlPath
-                        } else {
-                            "${base.protocol}://${base.host}:${base.port}$ctrlPath"
-                        }
-                    }
-                }
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
+        return parseDeviceFromDescriptionXml("", locationUrl)?.controlUrl
     }
 
     /**
@@ -137,7 +258,7 @@ class DlnaController(
             val protocolInfo = if (videoUri.endsWith(".ts", ignoreCase = true)) {
                 "http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             } else {
-                "http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+                "http-get:*:video/mp4:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             }
 
             try {

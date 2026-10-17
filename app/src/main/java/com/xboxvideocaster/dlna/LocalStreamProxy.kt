@@ -34,6 +34,23 @@ import kotlin.math.min
  */
 class LocalStreamProxy(private val context: Context) {
 
+    companion object {
+        @Volatile
+        private var instance: LocalStreamProxy? = null
+
+        fun getInstance(context: Context): LocalStreamProxy {
+            return instance ?: synchronized(this) {
+                instance ?: LocalStreamProxy(context.applicationContext).also {
+                    it.start()
+                    instance = it
+                }
+            }
+        }
+    }
+
+    @Volatile
+    var activeStream: PreparedStream? = null
+
     private var serverSocket: ServerSocket? = null
     private var isRunning = false
     var port: Int = 8989
@@ -58,14 +75,14 @@ class LocalStreamProxy(private val context: Context) {
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
-        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(12, 5, TimeUnit.MINUTES))
         .build()
 
     private val streamRegistry = ConcurrentHashMap<String, PreparedStream>()
     private val segmentFutures = ConcurrentHashMap<String, Future<ByteArray?>>()
-    private val prefetchPool = Executors.newFixedThreadPool(4)
+    private val prefetchPool = Executors.newFixedThreadPool(6)
 
     fun start() {
         if (isRunning) return
@@ -111,7 +128,7 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
-     * Analyse la vidéo, prépare les segments, la durée totale et pré-charge les 2 premiers segments
+     * Analyse la vidéo, prépare les segments, la durée totale et pré-charge les 3 premiers segments
      * en RAM avant d'envoyer l'ordre de lecture à la Xbox.
      */
     fun prepareStream(realStreamUrl: String, referer: String?, userAgent: String?): PreparedStream {
@@ -145,14 +162,14 @@ class LocalStreamProxy(private val context: Context) {
         )
         streamRegistry[id] = prepared
 
-        // Pré-charger les 6 premiers segments et attendre que les 2 premiers (20s de vidéo) soient prêts en RAM !
+        // Pré-charger les 8 premiers segments en parallèle (6 threads) et attendre 3 segments (30s) en RAM !
         if (segments.isNotEmpty()) {
-            triggerPrefetch(prepared, 0, 6)
-            val prebufferCount = min(2, segments.size)
+            triggerPrefetch(prepared, 0, 8)
+            val prebufferCount = min(3, segments.size)
             for (i in 0 until prebufferCount) {
                 try {
                     ensureSegmentDownload(segments[i].url, prepared.referer, prepared.userAgent)
-                        .get(8, TimeUnit.SECONDS)
+                        .get(10, TimeUnit.SECONDS)
                 } catch (_: Exception) {
                 }
             }
@@ -327,8 +344,8 @@ class LocalStreamProxy(private val context: Context) {
         val pidContinuityMap = HashMap<Int, Int>()
 
         for (i in startIndex until segments.size) {
-            // Pré-charger les 6 segments suivants (60 secondes d'avance en RAM !)
-            triggerPrefetch(prepared, i + 1, 6)
+            // Pré-charger les 8 segments suivants (80 secondes d'avance en RAM !)
+            triggerPrefetch(prepared, i + 1, 8)
 
             // Conserver les 4 derniers segments en RAM (pour les doubles requêtes Xbox et le recul -30s)
             if (i - 4 >= 0) {
@@ -350,10 +367,28 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
+     * Paquet PMT (PID 0x0FFF) propre ne déclarant que la vidéo H.264 (PID 0x0100) et l'audio AAC (PID 0x0101),
+     * sans la piste fantôme Apple ID3 Timed Metadata (PID 0x0102, stream_type 0x15) présente sur ansembed.net.
+     */
+    private val cleanPmtPacket: ByteArray = ByteArray(188) { 0xFF.toByte() }.apply {
+        val headerAndSection = intArrayOf(
+            0x47, 0x4F, 0xFF, 0x10, 0x00,
+            0x02, 0xB0, 0x17, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00,
+            0x1B, 0xE1, 0x00, 0xF0, 0x00,
+            0x0F, 0xE1, 0x01, 0xF0, 0x00,
+            0x2F, 0x44, 0xB9, 0x9B
+        )
+        for (idx in headerAndSection.indices) {
+            this[idx] = headerAndSection[idx].toByte()
+        }
+    }
+
+    /**
      * Nettoie un segment MPEG-TS (paquets de 188 octets) :
-     * 1. Supprime les paquets de bourrage illégaux (AFC=3 avec adaptation_field_length >= 183)
-     *    qui provoquaient une erreur de démultiplexage sur la Xbox (mini-freeze de 0.5s + apparition du menu OSD).
-     * 2. Ré-indexe de façon continue le Continuity Counter (4 bits de poids faible de l'octet 3) pour chaque PID.
+     * 1. Supprime les paquets de bourrage illégaux (AFC=3 avec adaptation_field_length >= 183).
+     * 2. Supprime la piste fantôme ID3 (PID 0x0102) et les tables PAT/PMT dupliquées sur les segments suivants
+     *    (pour que la Xbox voie un flux unique continu sans réinitialisation toutes les 10s).
+     * 3. Remplace le PMT initial par un PMT H.264+AAC pur et ré-indexe les Continuity Counters (CC).
      */
     private fun sanitizeTsSegment(
         raw: ByteArray,
@@ -385,12 +420,22 @@ class LocalStreamProxy(private val context: Context) {
                 }
             }
 
-            // Ignorer les paquets de bourrage purs (PID 0x1FFF)
-            if (pid == 0x1FFF) {
+            // Ignorer les paquets de bourrage purs (PID 0x1FFF) et la piste fantôme ID3 metadata (PID 0x0102)
+            if (pid == 0x1FFF || pid == 0x0102) {
                 continue
             }
 
-            System.arraycopy(raw, off, outBuf, outPos, 188)
+            // Supprimer les répétitions de PAT (PID 0) et PMT (PID 0x0FFF) aux frontières des segments suivants
+            // afin que le démultiplexeur Xbox ne réinitialise jamais l'interface TV toutes les 10 secondes !
+            if (!isFirstSegment && (pid == 0x0000 || pid == 0x0FFF)) {
+                continue
+            }
+
+            if (isFirstSegment && pid == 0x0FFF) {
+                System.arraycopy(cleanPmtPacket, 0, outBuf, outPos, 188)
+            } else {
+                System.arraycopy(raw, off, outBuf, outPos, 188)
+            }
 
             // Désactiver le flag de discontinuité éventuel pour éviter que l'OSD Xbox ne s'affiche
             if (!isFirstSegment && (afc == 2 || afc == 3)) {
@@ -495,16 +540,14 @@ class LocalStreamProxy(private val context: Context) {
             val contentType = resp.header("Content-Type") ?: "video/mp4"
             val contentLength = resp.header("Content-Length")
             val contentRange = resp.header("Content-Range")
-            val acceptRanges = resp.header("Accept-Ranges") ?: "bytes"
 
             val headers = buildString {
                 append("$statusLine\r\n")
                 append("Content-Type: $contentType\r\n")
                 if (contentLength != null) append("Content-Length: $contentLength\r\n")
                 if (contentRange != null) append("Content-Range: $contentRange\r\n")
-                append("Accept-Ranges: $acceptRanges\r\n")
                 append("transferMode.dlna.org: Streaming\r\n")
-                append("contentFeatures.dlna.org: DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+                append("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
                 append("Access-Control-Allow-Origin: *\r\n")
                 append("Connection: close\r\n\r\n")
             }

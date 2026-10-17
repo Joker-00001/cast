@@ -20,7 +20,7 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
 
@@ -38,10 +38,11 @@
 
         </activity>
 
-        <!-- Service de diffusion en arrière-plan (écran éteint / app réduite) -->
+        <!-- Service de diffusion en arrière-plan (persiste dans la barre de notif même si l'app est fermée) -->
         <service
             android:name=".dlna.CastForegroundService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="mediaPlayback" />
 
         <!-- FileProvider pour la mise à jour automatique intégrée -->
