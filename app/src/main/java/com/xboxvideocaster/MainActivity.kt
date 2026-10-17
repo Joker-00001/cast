@@ -193,6 +193,15 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         }
     }
 
+    override fun onNotificationCloseApp() {
+        runOnUiThread {
+            stopPositionTracker()
+            activePreparedStream = null
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            finishAndRemoveTask()
+        }
+    }
+
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -1472,8 +1481,10 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 delay(1000)
                 val prepared = activePreparedStream ?: break
                 if (!isXboxPaused && !isSeekingNow && currentPlaybackSec < prepared.totalDurationSec) {
-                    currentPlaybackSec += 1
+                    val serviceSec = CastForegroundService.currentPositionSec
+                    currentPlaybackSec = maxOf(currentPlaybackSec + 1, serviceSec).coerceAtMost(prepared.totalDurationSec)
                     CastForegroundService.currentPositionSec = currentPlaybackSec
+                    prepared.currentConfirmedPlaybackSec = currentPlaybackSec
                     updateTimerDisplay()
                     tickCount++
 

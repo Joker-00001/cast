@@ -22,14 +22,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.net.InetAddress
 import kotlin.concurrent.thread
+import kotlin.system.exitProcess
 
 /**
  * Service Android de premier plan (Foreground Service) avec :
  * 1. WakeLock CPU + WifiLock (WIFI_MODE_FULL_HIGH_PERF).
  * 2. Piste AudioTrack 100% silencieuse (PCM 0) en boucle : empêche Android (Samsung OneUI, Xiaomi MIUI, Doze Mode)
- *    de couper le Wi-Fi ou de geler l'application au bout de 5 minutes quand l'écran du téléphone est en veille !
- * 3. Ping Wi-Fi actif toutes les 8s vers la TV / Xbox pour maintenir l'antenne Wi-Fi éveillée en continu.
- * 4. Contrôles rapides dans la notification (Écran verrouillé) : ⏪ -30s | ⏸ Pause / ▶ Play | +30s ⏩ | ⏹ Stop.
+ *    de couper le Wi-Fi ou de geler l'application quand l'écran du téléphone est en veille !
+ * 3. Horloge matérielle 1s intégrée : met à jour `currentConfirmedPlaybackSec` même écran éteint.
+ * 4. 3 Boutons toujours visibles dans la barre de notification :
+ *    [⏸ Pause / ▶ Play]  |  [+30s ⏩]  |  [❌ Fermer l'app]
  */
 class CastForegroundService : Service() {
 
@@ -37,6 +39,7 @@ class CastForegroundService : Service() {
         fun onNotificationPlayPauseToggled(isPaused: Boolean)
         fun onNotificationSeekCompleted(newPositionSec: Int)
         fun onNotificationStopped()
+        fun onNotificationCloseApp()
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -52,8 +55,8 @@ class CastForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
 
         const val ACTION_STOP_CAST = "com.xboxvideocaster.ACTION_STOP_CAST"
+        const val ACTION_CLOSE_APP = "com.xboxvideocaster.ACTION_CLOSE_APP"
         const val ACTION_TOGGLE_PLAY_PAUSE = "com.xboxvideocaster.ACTION_TOGGLE_PLAY_PAUSE"
-        const val ACTION_REWIND_30 = "com.xboxvideocaster.ACTION_REWIND_30"
         const val ACTION_FORWARD_30 = "com.xboxvideocaster.ACTION_FORWARD_30"
 
         private const val EXTRA_DEVICE_IP = "extra_device_ip"
@@ -130,21 +133,37 @@ class CastForegroundService : Service() {
         intent?.getStringExtra(EXTRA_DEVICE_NAME)?.let { currentDeviceName = it }
 
         when (intent?.action) {
-            ACTION_STOP_CAST -> {
+            ACTION_CLOSE_APP, ACTION_STOP_CAST -> {
+                val shouldCloseApp = (intent.action == ACTION_CLOSE_APP)
                 isCastActive = false
                 isPausedState = false
                 stopSilentAudioAndWifiKeepAlive()
                 val ipToStop = currentDeviceIp
-                CoroutineScope(Dispatchers.IO).launch {
+                Thread {
                     try {
-                        DlnaController().stopMedia(ipToStop)
+                        kotlinx.coroutines.runBlocking {
+                            DlnaController().stopMedia(ipToStop)
+                        }
                     } catch (_: Exception) {
                     }
-                }
+                }.start()
                 LocalStreamProxy.getInstance(applicationContext).activeStream = null
-                remoteActionListener?.onNotificationStopped()
+                if (shouldCloseApp) {
+                    remoteActionListener?.onNotificationCloseApp()
+                } else {
+                    remoteActionListener?.onNotificationStopped()
+                }
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                if (shouldCloseApp) {
+                    Thread {
+                        try {
+                            Thread.sleep(350)
+                        } catch (_: Exception) {
+                        }
+                        exitProcess(0)
+                    }.start()
+                }
                 return START_NOT_STICKY
             }
 
@@ -165,11 +184,6 @@ class CastForegroundService : Service() {
                     } catch (_: Exception) {
                     }
                 }
-                return START_STICKY
-            }
-
-            ACTION_REWIND_30 -> {
-                performSeekFromNotification(-30)
                 return START_STICKY
             }
 
@@ -201,14 +215,7 @@ class CastForegroundService : Service() {
         val prepared = proxy.activeStream ?: return
         val ip = currentDeviceIp
         val maxSeek = (prepared.totalDurationSec - 5).coerceAtLeast(0)
-        // Estimer la position actuelle à partir du segment servi ou du compteur de MainActivity
-        val estimatedCurrent = if (currentPositionSec > 0) {
-            currentPositionSec
-        } else if (prepared.segments.isNotEmpty() && prepared.lastServedSegmentIdx in prepared.segments.indices) {
-            prepared.segments[prepared.lastServedSegmentIdx].startTimeSec.toInt()
-        } else {
-            0
-        }
+        val estimatedCurrent = maxOf(currentPositionSec, prepared.currentConfirmedPlaybackSec)
         val targetSec = (estimatedCurrent + deltaSec).coerceIn(0, maxSeek)
 
         CoroutineScope(Dispatchers.IO).launch {
@@ -230,6 +237,7 @@ class CastForegroundService : Service() {
                 } else {
                     dlna.seekMedia(ip, targetSec)
                     currentPositionSec = targetSec
+                    prepared.currentConfirmedPlaybackSec = targetSec
                     refreshNotification()
                     remoteActionListener?.onNotificationSeekCompleted(targetSec)
                 }
@@ -245,9 +253,10 @@ class CastForegroundService : Service() {
     }
 
     /**
-     * Joue un flux PCM 100% silencieux (zéros, volume 0) et envoie un ping Wi-Fi vers la TV/Xbox
-     * pour qu'Android considère l'application comme un lecteur audio actif (comme Spotify)
-     * et ne mette JAMAIS la puce Wi-Fi en veille au bout de 5 minutes d'écran éteint !
+     * Joue un flux PCM 100% silencieux (zéros, volume 0) d'exactement 1 seconde par tour de boucle :
+     * 1. Empêche Android de mettre la puce Wi-Fi en veille quand l'écran est éteint.
+     * 2. Fait avancer `currentConfirmedPlaybackSec` chaque seconde même si l'application est réduite ou l'écran éteint !
+     * 3. Envoie un ping réseau vers la TV toutes les 6 secondes.
      */
     private fun startSilentAudioAndWifiKeepAlive() {
         if (keepAliveThreadRunning) return
@@ -284,16 +293,27 @@ class CastForegroundService : Service() {
                 track.play()
                 silentAudioTrack = track
 
-                val silenceBytes = ByteArray(sampleRate * 2) // 1 seconde de silence PCM
+                val silenceBytes = ByteArray(sampleRate * 2) // Exactement 1 seconde de silence PCM 16-bit 8000Hz
                 var tick = 0
                 while (keepAliveThreadRunning && isCastActive) {
                     try {
                         track.write(silenceBytes, 0, silenceBytes.size)
                     } catch (_: Exception) {
+                        Thread.sleep(1000)
                     }
                     tick++
-                    // Toutes les 8 secondes, réveiller la table ARP / Wi-Fi vers l'IP de la TV / Xbox
-                    if (tick % 8 == 0) {
+
+                    // Mettre à jour l'horloge de lecture confirmée même quand le téléphone est en veille !
+                    if (!isPausedState) {
+                        currentPositionSec += 1
+                        val active = LocalStreamProxy.getInstance(applicationContext).activeStream
+                        if (active != null && currentPositionSec <= active.totalDurationSec) {
+                            active.currentConfirmedPlaybackSec = currentPositionSec
+                        }
+                    }
+
+                    // Toutes les 6 secondes, réveiller la table ARP / Wi-Fi vers l'IP de la TV / Xbox
+                    if (tick % 6 == 0) {
                         try {
                             InetAddress.getByName(currentDeviceIp).isReachable(1500)
                         } catch (_: Exception) {
@@ -334,16 +354,6 @@ class CastForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val rewindIntent = Intent(this, CastForegroundService::class.java).apply {
-            action = ACTION_REWIND_30
-        }
-        val pendingRewind = PendingIntent.getService(
-            this,
-            2,
-            rewindIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         val toggleIntent = Intent(this, CastForegroundService::class.java).apply {
             action = ACTION_TOGGLE_PLAY_PAUSE
         }
@@ -364,13 +374,13 @@ class CastForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val stopIntent = Intent(this, CastForegroundService::class.java).apply {
-            action = ACTION_STOP_CAST
+        val closeAppIntent = Intent(this, CastForegroundService::class.java).apply {
+            action = ACTION_CLOSE_APP
         }
-        val pendingStop = PendingIntent.getService(
+        val pendingCloseApp = PendingIntent.getService(
             this,
             1,
-            stopIntent,
+            closeAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -378,9 +388,10 @@ class CastForegroundService : Service() {
         val playPauseIcon = if (isPausedState) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause
         val statusPrefix = if (isPausedState) "⏸ En pause" else "▶ En lecture"
 
+        // 3 boutons d'action maximum : Android les affiche TOUS LES 3 en permanence dans la barre de notification !
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("📺 $currentDeviceName • $currentTitleText")
-            .setContentText("$statusPrefix • Contrôlez la TV directement d'ici")
+            .setContentText("$statusPrefix • Touchez pour ouvrir l'application")
             .setSmallIcon(playPauseIcon)
             .setContentIntent(pendingOpen)
             .setOngoing(true)
@@ -388,16 +399,15 @@ class CastForegroundService : Service() {
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .addAction(android.R.drawable.ic_media_rew, "⏪ -30s", pendingRewind)
             .addAction(playPauseIcon, playPauseLabel, pendingToggle)
             .addAction(android.R.drawable.ic_media_ff, "+30s ⏩", pendingForward)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "⏹ Stop", pendingStop)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "❌ Fermer l'app", pendingCloseApp)
             .build()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Ne pas arrêter le service quand l'utilisateur ferme l'application depuis le multitâche :
-        // la notification reste dans la barre de notif et la vidéo continue sur la TV / Xbox !
+        // Ne pas arrêter le service quand l'utilisateur balaie l'application depuis le multitâche :
+        // elle reste active dans la barre de notif jusqu'à ce qu'on clique sur "❌ Fermer l'app" !
         if (isCastActive) {
             acquireLocks()
             startSilentAudioAndWifiKeepAlive()
@@ -444,7 +454,7 @@ class CastForegroundService : Service() {
                 "Diffusion TV / Xbox en cours",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "Affiche la télécommande permanente pendant la diffusion vidéo sur la TV ou la Xbox"
+                description = "Affiche la télécommande permanente et le bouton Fermer l'app pendant la diffusion"
                 setSound(null, null)
                 enableVibration(false)
             }

@@ -6,7 +6,6 @@ import android.util.Log
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -24,13 +23,13 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Serveur Proxy & Remuxeur MPEG-TS haute performance pour Xbox One / Series :
- * 1. Pool HTTP/2 persistant (OkHttp) + déduplication des téléchargements en cours (Future)
- *    pour ne jamais télécharger deux fois le même segment.
- * 2. Pré-chargement de 2 segments complets (20s) avant le démarrage et 6 segments (60s) d'avance en RAM.
- * 3. Nettoyage MPEG-TS (ISO 13818-1) : supprime les paquets de bourrage illégaux (AFC=3, alen=183)
- *    générés par nginx-vod-module à la fin de chaque segment .ts et ré-indexe les Continuity Counters (CC)
- *    en continu -> élimine les micro-freezes de 0.5s et empêche le menu OSD de la TV de pop/dépop en boucle !
+ * Serveur Proxy & Remuxeur MPEG-TS haute stabilité pour Smart TV & Xbox One / Series :
+ * 1. Régulation de débit intelligente (Smart Pacing) : envoie immédiatement 3 segments (~30s) pour un démarrage
+ *    instantané, puis régule l'envoi pour maintenir exactement ~25-30s d'avance dans le buffer de la TV.
+ *    -> Empêche le débordement du buffer de la Smart TV (TCP ZeroWindow) qui causait la perte de signal
+ *       et le rollback au bout de 5 minutes !
+ * 2. Conservation intacte des tables PAT (0x0000) et PMT (0x0FFF) d'origine avec leur vrai CRC32 matériel.
+ * 3. Suppression des paquets de bourrage illégaux (AFC=3, alen>=183) et continuité stricte des compteurs CC.
  */
 class LocalStreamProxy(private val context: Context) {
 
@@ -71,8 +70,10 @@ class LocalStreamProxy(private val context: Context) {
         val isHls: Boolean,
         val segments: List<SegmentItem>,
         val totalDurationSec: Int,
-        @Volatile var lastServedSegmentIdx: Int = 0,
-        @Volatile var lastSeekOrStartWallMs: Long = System.currentTimeMillis()
+        @Volatile var highestServedSegmentIdx: Int = 0,
+        @Volatile var lastSeekTargetSec: Int = 0,
+        @Volatile var lastSeekOrStartWallMs: Long = System.currentTimeMillis(),
+        @Volatile var currentConfirmedPlaybackSec: Int = 0
     )
 
     private val httpClient = OkHttpClient.Builder()
@@ -84,7 +85,6 @@ class LocalStreamProxy(private val context: Context) {
 
     private val streamRegistry = ConcurrentHashMap<String, PreparedStream>()
     private val segmentFutures = ConcurrentHashMap<String, Future<ByteArray?>>()
-    // 3 threads max pour ne pas saturer l'antenne Wi-Fi du téléphone pendant qu'il envoie le flux à la Smart TV
     private val prefetchPool = Executors.newFixedThreadPool(3)
 
     fun start() {
@@ -144,7 +144,7 @@ class LocalStreamProxy(private val context: Context) {
 
         val id = "vid" + System.currentTimeMillis()
         val isHls = realStreamUrl.contains(".m3u8", ignoreCase = true) ||
-                realStreamUrl.contains("urlset", ignoreCase = true)
+            realStreamUrl.contains("urlset", ignoreCase = true)
 
         var segments = emptyList<SegmentItem>()
         var totalDuration = 0
@@ -162,12 +162,13 @@ class LocalStreamProxy(private val context: Context) {
             isHls = isHls,
             segments = segments,
             totalDurationSec = if (totalDuration > 0) totalDuration else 1440,
-            lastServedSegmentIdx = 0,
-            lastSeekOrStartWallMs = System.currentTimeMillis()
+            highestServedSegmentIdx = 0,
+            lastSeekTargetSec = 0,
+            lastSeekOrStartWallMs = System.currentTimeMillis(),
+            currentConfirmedPlaybackSec = 0
         )
         streamRegistry[id] = prepared
 
-        // Pré-charger les 3 premiers segments sans saturer le Wi-Fi et attendre les 2 premiers en RAM
         if (segments.isNotEmpty()) {
             triggerPrefetch(prepared, 0, 3)
             val prebufferCount = min(2, segments.size)
@@ -184,12 +185,15 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
-     * Pré-charge la zone cible avant un saut (+30s / -30s / curseur)
+     * Pré-charge la zone cible avant un saut (+30s / -30s / curseur / Skip Intro)
      */
     fun warmupForSeek(prepared: PreparedStream, targetSec: Int): Int {
         if (!prepared.isHls || prepared.segments.isEmpty()) return targetSec
         val startIndex = prepared.segments.indexOfLast { it.startTimeSec <= targetSec }.coerceAtLeast(0)
-        prepared.lastServedSegmentIdx = startIndex
+        val alignedSec = prepared.segments[startIndex].startTimeSec.toInt()
+        prepared.highestServedSegmentIdx = startIndex
+        prepared.lastSeekTargetSec = alignedSec
+        prepared.currentConfirmedPlaybackSec = alignedSec
         prepared.lastSeekOrStartWallMs = System.currentTimeMillis()
         triggerPrefetch(prepared, startIndex, 3)
         try {
@@ -200,7 +204,7 @@ class LocalStreamProxy(private val context: Context) {
             ).get(6, TimeUnit.SECONDS)
         } catch (_: Exception) {
         }
-        return prepared.segments[startIndex].startTimeSec.toInt()
+        return alignedSec
     }
 
     private fun resolveBestReferer(streamUrl: String, pageReferer: String?): String {
@@ -223,6 +227,9 @@ class LocalStreamProxy(private val context: Context) {
     fun buildPlaybackUrl(prepared: PreparedStream, startSeconds: Int = 0): String {
         val localIp = getLocalIpAddress() ?: "127.0.0.1"
         val safeSec = max(0, startSeconds)
+        prepared.lastSeekTargetSec = safeSec
+        prepared.currentConfirmedPlaybackSec = safeSec
+        prepared.lastSeekOrStartWallMs = System.currentTimeMillis()
         val ext = if (prepared.isHls) ".ts" else ".mp4"
         return "http://$localIp:$port/xbox/${prepared.id}_s${safeSec}$ext"
     }
@@ -285,11 +292,9 @@ class LocalStreamProxy(private val context: Context) {
     private fun handleClient(socket: Socket) {
         socket.use { client ->
             try {
-                // Timeout court uniquement pour lire les headers HTTP, puis 0 (infini) pendant le streaming
-                // afin que la connexion ne coupe JAMAIS quand le buffer de la Smart TV est plein !
                 client.soTimeout = 10000
                 client.keepAlive = true
-                client.sendBufferSize = 262144 // 256 KB socket buffer
+                client.sendBufferSize = 131072 // 128 KB socket buffer
                 client.tcpNoDelay = true
 
                 val input = client.getInputStream().bufferedReader()
@@ -307,7 +312,7 @@ class LocalStreamProxy(private val context: Context) {
                     }
                 }
 
-                // Désactiver le timeout une fois la requête lue pour supporter les pauses / buffers TV
+                // Désactiver le timeout de lecture une fois les headers reçus
                 client.soTimeout = 0
 
                 val token = path.substringAfter("/xbox/")
@@ -334,10 +339,13 @@ class LocalStreamProxy(private val context: Context) {
 
     /**
      * Envoie les segments MPEG-TS en continu avec :
-     * - Anti-rollback : si la Smart TV se reconnecte en cours de film (même sans header Range à cause de DLNA.ORG_OP=00),
-     *   reprend automatiquement au segment où la TV s'était arrêtée au lieu de repartir au début !
-     * - DLNA.ORG_OP=00 sans DLNA.ORG_PN strict (accepte l'audio AAC 32 kHz d'Anime-Sama sans reset sur Xbox)
-     * - Filtrage des paquets illégaux (AFC=3, alen=183) et continuité stricte des compteurs CC MPEG-TS !
+     * 1. Smart Pacing (Régulation de débit) :
+     *    - Envoie les 3 premiers segments (~30s) à pleine vitesse pour un démarrage instantané.
+     *    - Puis régule l'envoi pour rester ~30s devant le temps réel de lecture de la TV.
+     *    - Cela empêche le buffer de la Smart TV (20-30 Mo) de déborder à 5 minutes et d'entraîner
+     *      une coupure TCP ("Signal faible") ou un rollback à 0:00 !
+     * 2. Reprise anti-rollback exacte basée sur le temps de lecture réel (currentConfirmedPlaybackSec) :
+     *    - Si la TV se reconnecte au bout de X minutes, elle reprend exactement à la seconde affichée à l'écran !
      */
     private fun serveBufferedHlsStream(
         method: String,
@@ -352,7 +360,7 @@ class LocalStreamProxy(private val context: Context) {
             append("transferMode.dlna.org: Streaming\r\n")
             append("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
-            append("Connection: close\r\n\r\n")
+            append("Connection: keep-alive\r\n\r\n")
         }
         out.write(headers.toByteArray())
         out.flush()
@@ -364,31 +372,41 @@ class LocalStreamProxy(private val context: Context) {
 
         var startIndex = segments.indexOfLast { it.startTimeSec <= startSec }.coerceAtLeast(0)
         val elapsedSinceSeekOrStartMs = System.currentTimeMillis() - prepared.lastSeekOrStartWallMs
-        // Si la Smart TV se reconnecte plus de 12s après le démarrage ou le dernier saut (suite à une micro-coupure Wi-Fi),
-        // reprendre directement au segment en cours (même si la TV n'envoie pas de header Range à cause de DLNA.ORG_OP=00)
-        // -> élimine définitivement le rollback de 5 minutes en arrière !
-        if ((elapsedSinceSeekOrStartMs > 12_000L || (rangeHeader != null && !rangeHeader.startsWith("bytes=0-"))) &&
-            prepared.lastServedSegmentIdx > startIndex + 1
-        ) {
-            startIndex = (prepared.lastServedSegmentIdx - 1).coerceAtLeast(startIndex)
+        val confirmedSec = prepared.currentConfirmedPlaybackSec
+
+        // Si la TV se reconnecte en cours de lecture (> 15s après le lancement ou le dernier saut),
+        // calculer l'index exact à partir de la position réelle de lecture (confirmedSec)
+        // pour ne JAMAIS faire de rollback en arrière ni sauter trop loin en avant !
+        if (elapsedSinceSeekOrStartMs > 15_000L && confirmedSec > startSec + 12) {
+            val targetResumeSec = (confirmedSec - 4).coerceAtLeast(startSec)
+            val resumeIdx = segments.indexOfLast { it.startTimeSec <= targetResumeSec }.coerceAtLeast(startIndex)
+            startIndex = resumeIdx
+        } else if (rangeHeader != null && !rangeHeader.startsWith("bytes=0-") && prepared.highestServedSegmentIdx > startIndex + 1) {
+            val targetResumeSec = (confirmedSec - 4).coerceAtLeast(startSec)
+            startIndex = segments.indexOfLast { it.startTimeSec <= targetResumeSec }.coerceAtLeast(startIndex)
         }
+
+        val connectionStartWallMs = System.currentTimeMillis()
+        val connectionBaseVideoSec = segments[startIndex].startTimeSec
 
         // Table des Continuity Counters (CC 0..15) par PID pour un flux MPEG-TS 100% continu sans coupure
         val pidContinuityMap = HashMap<Int, Int>()
 
         for (i in startIndex until segments.size) {
-            prepared.lastServedSegmentIdx = i
-
-            // Pré-charger 4 segments d'avance (sur 3 threads) pour garder le Wi-Fi fluide vers la TV
-            // tout en ayant ~40-60s d'avance en RAM
-            triggerPrefetch(prepared, i + 1, 4)
-
-            // Libérer la RAM au fur et à mesure (garder les 2 derniers segments)
-            if (i - 2 >= 0) {
-                segmentFutures.remove(segments[i - 2].url)
+            if (i > prepared.highestServedSegmentIdx) {
+                prepared.highestServedSegmentIdx = i
             }
 
-            val segUrl = segments[i].url
+            // Pré-charger 4 segments d'avance en RAM sur le téléphone
+            triggerPrefetch(prepared, i + 1, 4)
+
+            // Libérer la RAM des segments déjà consommés
+            if (i - 3 >= 0) {
+                segmentFutures.remove(segments[i - 3].url)
+            }
+
+            val seg = segments[i]
+            val segUrl = seg.url
             var rawBytes = try {
                 ensureSegmentDownload(segUrl, prepared.referer, prepared.userAgent)
                     .get(25, TimeUnit.SECONDS)
@@ -400,42 +418,61 @@ class LocalStreamProxy(private val context: Context) {
                 rawBytes = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent) ?: continue
             }
 
+            // SMART PACING : après avoir envoyé les 3 premiers segments (~30s de buffer initial rapide),
+            // ne jamais dépasser +32 secondes d'avance sur le temps réel de lecture de la TV !
+            // Cela garantit que le buffer interne de la Smart TV ne sature jamais (fini le rollback à 5 min et le "Signal faible").
+            val segmentsSentOnThisConn = i - startIndex
+            if (segmentsSentOnThisConn >= 3) {
+                while (true) {
+                    if (CastForegroundService.isPausedState) {
+                        // Si la TV est en pause, patienter doucement sans couper le socket
+                        try {
+                            Thread.sleep(250)
+                        } catch (_: InterruptedException) {
+                            break
+                        }
+                        continue
+                    }
+                    val realElapsedSec = (System.currentTimeMillis() - connectionStartWallMs) / 1000.0
+                    val videoElapsedSec = seg.startTimeSec - connectionBaseVideoSec
+                    val bufferAheadSec = videoElapsedSec - realElapsedSec
+                    if (bufferAheadSec <= 30.0) {
+                        break
+                    }
+                    try {
+                        Thread.sleep(200)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
+            }
+
             val cleanBytes = sanitizeTsSegment(rawBytes, pidContinuityMap, isFirstSegment = (i == startIndex))
             var offset = 0
-            val chunkSize = 32768 // 32 KB chunks pour un flux Wi-Fi régulier sans pic de latence
+            val chunkSize = 188 * 174 // 32 712 octets (multiple exact de 188 octets MPEG-TS !)
             while (offset < cleanBytes.size) {
                 val len = min(chunkSize, cleanBytes.size - offset)
                 out.write(cleanBytes, offset, len)
                 offset += len
+                // Léger lissage entre les blocs après le pré-buffer initial pour un flux Wi-Fi ultra-régulier
+                if (segmentsSentOnThisConn >= 3 && offset < cleanBytes.size) {
+                    try {
+                        Thread.sleep(6)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
             }
             out.flush()
         }
     }
 
     /**
-     * Paquet PMT (PID 0x0FFF) propre ne déclarant que la vidéo H.264 (PID 0x0100) et l'audio AAC (PID 0x0101),
-     * sans la piste fantôme Apple ID3 Timed Metadata (PID 0x0102, stream_type 0x15) présente sur ansembed.net.
-     */
-    private val cleanPmtPacket: ByteArray = ByteArray(188) { 0xFF.toByte() }.apply {
-        val headerAndSection = intArrayOf(
-            0x47, 0x4F, 0xFF, 0x10, 0x00,
-            0x02, 0xB0, 0x17, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00,
-            0x1B, 0xE1, 0x00, 0xF0, 0x00,
-            0x0F, 0xE1, 0x01, 0xF0, 0x00,
-            0x2F, 0x44, 0xB9, 0x9B
-        )
-        for (idx in headerAndSection.indices) {
-            this[idx] = headerAndSection[idx].toByte()
-        }
-    }
-
-    /**
      * Nettoie un segment MPEG-TS (paquets de 188 octets) :
-     * 1. Supprime les paquets de bourrage illégaux (AFC=3 avec adaptation_field_length >= 183).
-     * 2. Supprime la piste fantôme ID3 (PID 0x0102).
-     * 3. Conserve les tables PAT (PID 0x0000) et remplace le PMT (PID 0x0FFF) par un PMT H.264+AAC propre
-     *    avec Continuity Counter (CC) continu dans chaque segment (indispensable pour que les Smart TV
-     *    ne perdent pas le signal PSI au bout de quelques minutes !).
+     * 1. Conserve INTACTES les tables PAT (0x0000) et PMT (0x0FFF) d'origine avec leur vrai CRC32 matériel !
+     * 2. Supprime uniquement les paquets de bourrage illégaux (AFC=3 avec adaptation_field_length >= 183)
+     *    et les paquets nuls (PID 0x1FFF).
+     * 3. Assure la continuité parfaite des Continuity Counters (CC 0..15) d'un segment à l'autre.
      */
     private fun sanitizeTsSegment(
         raw: ByteArray,
@@ -467,21 +504,15 @@ class LocalStreamProxy(private val context: Context) {
                 }
             }
 
-            // Ignorer les paquets de bourrage purs (PID 0x1FFF) et la piste fantôme ID3 metadata (PID 0x0102)
-            if (pid == 0x1FFF || pid == 0x0102) {
+            // Ignorer uniquement les paquets de bourrage nuls (PID 0x1FFF)
+            if (pid == 0x1FFF) {
                 continue
             }
 
-            // Remplacer le PMT (PID 0x0FFF) dans chaque segment par notre PMT propre (sans piste ID3 0x0102)
-            // tout en conservant PAT (PID 0) et PMT (PID 0x0FFF) pour que la Smart TV garde le verrouillage du signal !
-            if (pid == 0x0FFF) {
-                System.arraycopy(cleanPmtPacket, 0, outBuf, outPos, 188)
-            } else {
-                System.arraycopy(raw, off, outBuf, outPos, 188)
-            }
+            System.arraycopy(raw, off, outBuf, outPos, 188)
 
-            // Désactiver le flag de discontinuité éventuel pour éviter que l'OSD Xbox ne s'affiche
-            if (!isFirstSegment && (afc == 2 || afc == 3)) {
+            // Désactiver le flag de discontinuité éventuel sur les pistes audio/vidéo (hors PAT/PMT)
+            if (!isFirstSegment && pid != 0x0000 && pid != 0x0FFF && (afc == 2 || afc == 3)) {
                 val alen = outBuf[outPos + 4].toInt() and 0xFF
                 if (alen > 0) {
                     outBuf[outPos + 5] = (outBuf[outPos + 5].toInt() and 0x7F).toByte()
@@ -613,7 +644,7 @@ class LocalStreamProxy(private val context: Context) {
                 append("transferMode.dlna.org: Streaming\r\n")
                 append("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
                 append("Access-Control-Allow-Origin: *\r\n")
-                append("Connection: close\r\n\r\n")
+                append("Connection: keep-alive\r\n\r\n")
             }
             out.write(headers.toByteArray())
             out.flush()
