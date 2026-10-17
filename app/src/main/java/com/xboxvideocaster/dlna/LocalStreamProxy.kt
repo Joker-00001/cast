@@ -601,6 +601,34 @@ class LocalStreamProxy(private val context: Context) {
         }
     }
 
+    /**
+     * Vérifie que la vidéo est réellement lisible AVANT de l'envoyer à la TV
+     * (lien mort, lecteur supprimé, serveur qui bloque...). Évite que la TV tourne dans le vide.
+     */
+    fun isStreamPlayable(prepared: PreparedStream): Boolean {
+        return try {
+            if (prepared.isHls) {
+                if (prepared.segments.isEmpty()) return false
+                val first = ensureSegmentDownload(
+                    prepared.segments[0].url, prepared.referer, prepared.userAgent
+                ).get(12, TimeUnit.SECONDS)
+                first != null && first.isNotEmpty()
+            } else {
+                val reqBuilder = Request.Builder()
+                    .url(prepared.originalUrl)
+                    .header("User-Agent", prepared.userAgent)
+                    .header("Referer", prepared.referer)
+                    .header("Range", "bytes=0-1023")
+                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                    val type = resp.header("Content-Type")?.lowercase(Locale.ROOT) ?: ""
+                    resp.isSuccessful && !type.contains("text/html")
+                }
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun downloadSegmentBytes(url: String, referer: String, userAgent: String): ByteArray? {
         for (attempt in 1..5) {
             try {

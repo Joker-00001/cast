@@ -1795,9 +1795,22 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         updateTimerDisplay()
         positionTrackerJob = lifecycleScope.launch {
             var tickCount = 0
+            var trackedStreamId = activePreparedStream?.id
+            var tvConfirmedPlaying = false
+            var secondsWithoutTvProgress = 0
+            var stuckWarningShown = false
+            var streamStartTick = 0
             while (isActive && activePreparedStream != null) {
                 delay(1000)
                 val prepared = activePreparedStream ?: break
+                if (prepared.id != trackedStreamId) {
+                    // Nouvel épisode (enchaînement auto) : réinitialiser la détection
+                    trackedStreamId = prepared.id
+                    tvConfirmedPlaying = false
+                    secondsWithoutTvProgress = 0
+                    stuckWarningShown = false
+                    streamStartTick = tickCount
+                }
                 if (!isXboxPaused && !isSeekingNow && currentPlaybackSec < prepared.totalDurationSec) {
                     val serviceSec = CastForegroundService.currentPositionSec
                     currentPlaybackSec = maxOf(currentPlaybackSec + 1, serviceSec).coerceAtMost(prepared.totalDurationSec)
@@ -1805,6 +1818,42 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     prepared.currentConfirmedPlaybackSec = currentPlaybackSec
                     updateTimerDisplay()
                     tickCount++
+                    if (!tvConfirmedPlaying) secondsWithoutTvProgress++
+
+                    // SYNCHRO TV : toutes les 5s, lire la VRAIE position sur la TV et corriger le chrono
+                    if (tickCount % 5 == 0) {
+                        val ipSync = binding.etXboxIp.text?.toString()?.trim() ?: ""
+                        val streamIdAtQuery = prepared.id
+                        if (ipSync.isNotBlank()) {
+                            val tvSec = dlnaController.getElapsedSeconds(ipSync)
+                            val ticksOnThisStream = tickCount - streamStartTick
+                            val plausible = tvSec <= currentPlaybackSec + 45
+                            if (tvSec > 0 && plausible && ticksOnThisStream >= 8 &&
+                                activePreparedStream?.id == streamIdAtQuery && !isSeekingNow
+                            ) {
+                                tvConfirmedPlaying = true
+                                secondsWithoutTvProgress = 0
+                                if (stuckWarningShown) {
+                                    stuckWarningShown = false
+                                    updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
+                                    binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))
+                                }
+                                if (kotlin.math.abs(tvSec - currentPlaybackSec) > 3) {
+                                    currentPlaybackSec = tvSec.coerceAtMost(prepared.totalDurationSec)
+                                    CastForegroundService.currentPositionSec = currentPlaybackSec
+                                    prepared.currentConfirmedPlaybackSec = currentPlaybackSec
+                                    updateTimerDisplay()
+                                }
+                            }
+                        }
+                    }
+
+                    // La TV ne démarre pas après 30s : prévenir l'utilisateur au lieu d'afficher une fausse lecture
+                    if (!tvConfirmedPlaying && !stuckWarningShown && secondsWithoutTvProgress >= 30) {
+                        stuckWarningShown = true
+                        updateStatus("⚠️ La TV ne semble pas lire la vidéo. Essayez un autre lecteur ou relancez.", isLoading = false)
+                        binding.tvStatus.setTextColor(Color.parseColor("#FBBF24"))
+                    }
 
                     // Sauvegarder automatiquement la progression toutes les 4 secondes ("Reprendre où j'en étais")
                     if (tickCount % 4 == 0 && currentPlaybackSec > 10) {
@@ -2075,6 +2124,22 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     referer = referer,
                     userAgent = VideoStreamSniffer.USER_AGENT
                 )
+            }
+
+            // Vérifier que le lien fonctionne vraiment avant d'envoyer à la TV
+            val playable = withContext(Dispatchers.IO) { localStreamProxy.isStreamPlayable(prepared) }
+            if (!playable) {
+                lastDetectedStreamUrl = null
+                updateStatus("❌ Ce lecteur ne fonctionne pas. Essayez un autre lecteur (ou VO/VF).", isLoading = false)
+                binding.tvStatus.setTextColor(Color.parseColor("#F87171"))
+                binding.btnCast.isEnabled = true
+                updateCastButtonUi(isCastActive = activePreparedStream != null)
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("❌ Lien vidéo indisponible")
+                    .setMessage("Ce lecteur ne répond pas (lien mort ou supprimé par le site).\n\nChoisissez un autre lecteur dans le menu « LECTEUR », ou changez VO / VF, puis relancez.")
+                    .setPositiveButton("OK", null)
+                    .show()
+                return@launch
             }
 
             val safeStartSec = if (initialStartSec > 0 && initialStartSec < prepared.totalDurationSec - 15) {
