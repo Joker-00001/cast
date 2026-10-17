@@ -1,0 +1,681 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black">
+
+    <!-- Top Header & Xbox IP Bar -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/surface_card"
+        android:gravity="center_vertical"
+        android:orientation="vertical"
+        android:paddingHorizontal="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- Row 1: Title + Accueil Button + Xbox IP Input -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHomeHub"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginEnd="8dp"
+                android:backgroundTint="#2B303B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="10dp"
+                android:text="🏠 Sites"
+                android:textColor="@color/white"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:cornerRadius="8dp" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Xbox &amp; TV Caster"
+                android:textColor="@color/white"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnScanDevices"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginEnd="6dp"
+                android:backgroundTint="#1E3A8A"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
+                android:text="📡 TV/Xbox"
+                android:textColor="#93C5FD"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                app:cornerRadius="8dp" />
+
+            <EditText
+                android:id="@+id/etXboxIp"
+                android:layout_width="112dp"
+                android:layout_height="34dp"
+                android:background="@drawable/bg_input_field"
+                android:gravity="center"
+                android:hint="192.168.1.52"
+                android:inputType="textUri"
+                android:paddingHorizontal="6dp"
+                android:singleLine="true"
+                android:text="192.168.1.52"
+                android:textColor="@color/white"
+                android:textColorHint="@color/text_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Row 2: Quick Site Shortcuts + Favoris + URL Bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHomeAnimeSama"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#1E293B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="7dp"
+                android:text="⚡ Anime"
+                android:textColor="#38BDF8"
+                android:textSize="11sp"
+                app:cornerRadius="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHomeFrenchStream"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#2E1A0F"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="7dp"
+                android:text="🎬 FS26"
+                android:textColor="#FB923C"
+                android:textSize="11sp"
+                app:cornerRadius="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnFavorites"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="6dp"
+                android:backgroundTint="#312E18"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
+                android:text="⭐"
+                android:textColor="#FACC15"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:cornerRadius="8dp" />
+
+            <EditText
+                android:id="@+id/etVideoUrl"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_input_field"
+                android:hint="Rechercher ou coller une URL..."
+                android:imeOptions="actionGo"
+                android:inputType="textUri"
+                android:paddingHorizontal="10dp"
+                android:singleLine="true"
+                android:text=""
+                android:textColor="@color/white"
+                android:textColorHint="@color/text_secondary"
+                android:textSize="12sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnGoUrl"
+                android:layout_width="44dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="5dp"
+                android:backgroundTint="@color/xbox_green"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                android:text="GO"
+                android:textColor="@color/white"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                app:cornerRadius="8dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Built-in Adblock WebView -->
+    <WebView
+        android:id="@+id/webViewBrowser"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@id/bottomCastBar"
+        app:layout_constraintTop_toBottomOf="@id/topBar" />
+
+    <!-- Home Hub Overlay (Choix du site au lancement) -->
+    <LinearLayout
+        android:id="@+id/layoutHomeHub"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:background="@color/black"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:visibility="visible"
+        app:layout_constraintBottom_toTopOf="@id/bottomCastBar"
+        app:layout_constraintTop_toBottomOf="@id/topBar">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎮 Choisissez une plateforme"
+            android:textColor="@color/white"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="16dp"
+            android:gravity="center"
+            android:text="Navigation sans publicité &amp; diffusion directe sur votre TV ou Xbox"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp" />
+
+        <!-- Big Button 1: Anime-Sama -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardSelectAnimeSama"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:clickable="true"
+            android:focusable="true"
+            app:cardBackgroundColor="#132032"
+            app:cardCornerRadius="18dp"
+            app:strokeColor="#38BDF8"
+            app:strokeWidth="1.5dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="16dp"
+                    android:text="⚡"
+                    android:textSize="30sp" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Anime-Sama"
+                        android:textColor="#38BDF8"
+                        android:textSize="19sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Animes VOSTFR &amp; VF en streaming complet"
+                        android:textColor="#CBD5E1"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Big Button 2: French Stream (fs26.lol) -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardSelectFrenchStream"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:clickable="true"
+            android:focusable="true"
+            app:cardBackgroundColor="#27170E"
+            app:cardCornerRadius="18dp"
+            app:strokeColor="#FB923C"
+            app:strokeWidth="1.5dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="16dp"
+                    android:text="🎬"
+                    android:textSize="30sp" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="French Stream (FS26)"
+                        android:textColor="#FB923C"
+                        android:textSize="19sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Films, Séries Netflix / Prime / Disney+ en VF &amp; VOSTFR"
+                        android:textColor="#FDE68A"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Bouton Favoris / Séries en cours -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnHomeFavorites"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginBottom="8dp"
+            android:backgroundTint="#312E18"
+            android:text="⭐ Mes Favoris &amp; Séries en cours"
+            android:textColor="#FACC15"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            app:cornerRadius="12dp" />
+
+        <!-- Bouton Scanner les appareils sur le Wi-Fi -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnHomeScanDevices"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:backgroundTint="#1E3A8A"
+            android:text="📡 Scanner les TV / Xbox sur mon Wi-Fi"
+            android:textColor="#93C5FD"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            app:cornerRadius="12dp" />
+
+        <!-- Big Button 3: Reprendre où j'en étais -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnResumeLastPage"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="8dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="⏳ Reprendre où j'en étais"
+            android:textColor="#4ADE80"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            app:cornerRadius="12dp"
+            app:strokeColor="#14532D" />
+
+    </LinearLayout>
+
+    <!-- Bottom Dynamic Status, Remote Control & Cast Bar (Réductible par slide / bouton) -->
+    <LinearLayout
+        android:id="@+id/bottomCastBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:animateLayoutChanges="true"
+        android:background="@color/surface_card"
+        android:elevation="12dp"
+        android:gravity="center_vertical"
+        android:orientation="vertical"
+        android:paddingHorizontal="10dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="10dp"
+        app:layout_constraintBottom_toBottomOf="parent">
+
+        <!-- Petite barre poignée visuelle de slide -->
+        <View
+            android:id="@+id/dragHandlePill"
+            android:layout_width="38dp"
+            android:layout_height="4dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="5dp"
+            android:background="#475569" />
+
+        <!-- Status, Timer & Bouton Réduire/Ouvrir Row -->
+        <LinearLayout
+            android:id="@+id/layoutStatusHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingBottom="4dp">
+
+            <ProgressBar
+                android:id="@+id/progressBar"
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:layout_marginEnd="8dp"
+                android:indeterminateTint="@color/xbox_green"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/tvStatus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Choisissez un site pour commencer"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvTimer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:layout_marginEnd="6dp"
+                android:text="0:00:00"
+                android:textColor="@color/white"
+                android:textSize="12sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnToggleBottomPanel"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:backgroundTint="#2B303B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
+                android:text="▼ Réduire"
+                android:textColor="#CBD5E1"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                app:cornerRadius="7dp" />
+        </LinearLayout>
+
+        <!-- Partie réductible (slide vers le bas pour masquer, slide vers le haut pour afficher) -->
+        <LinearLayout
+            android:id="@+id/layoutCollapsibleControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- Télécommande TV / Xbox avec Curseur (SeekBar) + Boutons (-30s / Pause / +30s / Stop) -->
+            <LinearLayout
+                android:id="@+id/layoutRemoteControls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <!-- Barre de progression (Slider manuel) -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/tvCurrentTime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0:00:00"
+                        android:textColor="@color/white"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <SeekBar
+                        android:id="@+id/seekBarProgress"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginHorizontal="6dp"
+                        android:layout_weight="1"
+                        android:max="1440"
+                        android:progress="0"
+                        android:progressBackgroundTint="#3F444E"
+                        android:progressTint="@color/xbox_green"
+                        android:thumbTint="@color/xbox_green" />
+
+                    <TextView
+                        android:id="@+id/tvTotalTime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0:24:00"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Ligne Télécommande : -30s / Pause / +30s / Stop -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnRewind30"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="#2B303B"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="⏪ -30s"
+                        android:textColor="@color/white"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnPlayPause"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1.2"
+                        android:backgroundTint="#1E293B"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="⏸ PAUSE"
+                        android:textColor="#38BDF8"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnForward30"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="#2B303B"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="+30s ⏩"
+                        android:textColor="@color/white"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnStop"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:backgroundTint="#3B1818"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:minWidth="50dp"
+                        android:paddingHorizontal="10dp"
+                        android:text="⏹"
+                        android:textColor="@color/accent_red"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Ligne unique d'options : Ép. Suivant Auto + Skip Intro + Plein Écran Tél -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAutoNext"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_marginEnd="5dp"
+                    android:layout_weight="1.05"
+                    android:backgroundTint="#2B303B"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingHorizontal="4dp"
+                    android:text="⏭ Auto: OFF"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="10.5sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="9dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSkipIntro"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_marginEnd="5dp"
+                    android:layout_weight="1.05"
+                    android:backgroundTint="#2E1065"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingHorizontal="4dp"
+                    android:text="⏭ Skip Intro"
+                    android:textColor="#DDD6FE"
+                    android:textSize="10.5sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="9dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnPhoneFullscreen"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="#1E293B"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingHorizontal="4dp"
+                    android:text="⛶ Plein écran"
+                    android:textColor="#38BDF8"
+                    android:textSize="10.5sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="9dp" />
+            </LinearLayout>
+
+            <!-- Bouton principal de lancement -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnCast"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:backgroundTint="@color/xbox_green"
+                android:text="📺 LANCER SUR LA XBOX / TV"
+                android:textColor="@color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                app:cornerRadius="12dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Conteneur Plein Écran Paysage natif HTML5 Video -->
+    <FrameLayout
+        android:id="@+id/fullscreenContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@color/black"
+        android:elevation="24dp"
+        android:visibility="gone" />
+
+    <!-- Bouton flottant pour quitter le mode Plein Écran Paysage sur le téléphone -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnExitPhoneFullscreen"
+        style="@style/Widget.Material3.Button.TonalButton"
+        android:layout_width="wrap_content"
+        android:layout_height="36dp"
+        android:layout_marginTop="14dp"
+        android:layout_marginEnd="14dp"
+        android:alpha="0.82"
+        android:backgroundTint="#22262E"
+        android:elevation="28dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:paddingHorizontal="12dp"
+        android:text="✕ Quitter plein écran"
+        android:textColor="@color/white"
+        android:textSize="11sp"
+        android:visibility="gone"
+        app:cornerRadius="18dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

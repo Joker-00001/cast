@@ -1,0 +1,10 @@
+<resources>
+    <color name="black">#FF101214</color>
+    <color name="surface_dark">#FF1A1C1E</color>
+    <color name="surface_card">#FF22252A</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="text_secondary">#FF9E9E9E</color>
+    <color name="xbox_green">#FF107C10</color>
+    <color name="xbox_green_dark">#FF0E6B0E</color>
+    <color name="accent_red">#FFE53935</color>
+</resources>
