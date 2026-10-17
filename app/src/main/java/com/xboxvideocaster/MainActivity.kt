@@ -472,7 +472,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                                     updateStatus("⏭ Épisode suivant pré-chargé en mémoire ! Transition fluide à la fin...", isLoading = false)
                                 }
                             } else {
-                                sendStreamToXbox(extracted.first, extracted.second, ip, forceStartFromZero = true, stopFirst = false)
+                                sendStreamToXbox(extracted.first, extracted.second, ip, forceStartFromZero = true, stopFirst = true)
                             }
                         } else {
                             withContext(Dispatchers.Main) {
@@ -1552,6 +1552,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 )
                 // 2. Mettre à jour la page Web (menu déroulant Anime-Sama / bouton French Stream)
                 applyNextEpisodeToWebView(targetEpIdx)
+                startPositionTracker()
                 Toast.makeText(this@MainActivity, "⏭ $streamTitle lancé !", Toast.LENGTH_SHORT).show()
             }
 
@@ -1568,7 +1569,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     videoUri = proxiedUrl,
                     title = streamTitle,
                     durationSeconds = nextPrepared.totalDurationSec,
-                    stopFirst = false // Ne pas couper le lecteur de la TV !
+                    stopFirst = true // Purge le buffer résiduel de l'ancien épisode pour éviter le déclenchement OnCompletion à 0:00 !
                 )
             }
         } else {
