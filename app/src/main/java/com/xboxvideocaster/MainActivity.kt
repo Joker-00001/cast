@@ -1820,7 +1820,19 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     prepared.currentConfirmedPlaybackSec = currentPlaybackSec
                     updateTimerDisplay()
                     tickCount++
-                    if (!tvConfirmedPlaying) secondsWithoutTvProgress++
+                    if (!tvConfirmedPlaying) {
+                        if (localStreamProxy.hasActiveClient(prepared.id) || prepared.hasClientConnected) {
+                            tvConfirmedPlaying = true
+                            secondsWithoutTvProgress = 0
+                            if (stuckWarningShown) {
+                                stuckWarningShown = false
+                                updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
+                                binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))
+                            }
+                        } else {
+                            secondsWithoutTvProgress++
+                        }
+                    }
 
                     // SYNCHRO TV toutes les 5s : position réelle = seconde de départ de l'URL en cours + temps relatif de la TV
                     if (tickCount % 5 == 0) {

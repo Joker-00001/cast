@@ -74,7 +74,8 @@ class LocalStreamProxy(private val context: Context) {
         @Volatile var lastSeekTargetSec: Int = 0,
         @Volatile var lastSeekOrStartWallMs: Long = System.currentTimeMillis(),
         @Volatile var currentConfirmedPlaybackSec: Int = 0,
-        @Volatile var isPlayable: Boolean = true
+        @Volatile var isPlayable: Boolean = true,
+        @Volatile var hasClientConnected: Boolean = false
     )
 
     private val httpClient = OkHttpClient.Builder()
@@ -96,6 +97,11 @@ class LocalStreamProxy(private val context: Context) {
                 s.close()
             } catch (_: Exception) {}
         }
+    }
+
+    fun hasActiveClient(streamId: String): Boolean {
+        val sockets = streamSockets[streamId] ?: return false
+        return sockets.any { !it.isClosed && it.isConnected }
     }
 
     private fun registerClientSocket(streamId: String, socket: Socket) {
@@ -373,9 +379,10 @@ class LocalStreamProxy(private val context: Context) {
                 val out = client.getOutputStream()
 
                 registerClientSocket(prepared.id, client)
+                prepared.hasClientConnected = true
                 try {
                     if (prepared.isHls) {
-                        serveBufferedHlsStream(method, prepared, startSec, rangeHeader, out)
+                        serveBufferedHlsStream(method, prepared, startSec, rangeHeader, out, client)
                     } else {
                         serveDirectMp4(method, prepared, rangeHeader, out)
                     }
@@ -403,7 +410,8 @@ class LocalStreamProxy(private val context: Context) {
         prepared: PreparedStream,
         startSec: Int,
         rangeHeader: String?,
-        out: OutputStream
+        out: OutputStream,
+        clientSocket: Socket? = null
     ) {
         val headers = buildString {
             append("HTTP/1.1 200 OK\r\n")
@@ -485,6 +493,9 @@ class LocalStreamProxy(private val context: Context) {
             val segmentsSentOnThisConn = i - startIndex
             if (segmentsSentOnThisConn >= 4) {
                 while (true) {
+                    if (clientSocket?.isClosed == true || (activeStream != null && activeStream?.id != prepared.id)) {
+                        break
+                    }
                     if (CastForegroundService.isPausedState) {
                         // Si la TV est en pause, patienter doucement sans couper le socket
                         try {

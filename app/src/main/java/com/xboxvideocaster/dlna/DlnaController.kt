@@ -339,16 +339,27 @@ class DlnaController(
                 <CurrentURIMetaData>$didlLiteMetadata</CurrentURIMetaData>
             """.trimIndent()
 
-            val setResult = sendSoapAction(controlUrl, "SetAVTransportURI", setUriArgs)
+            var setResult = sendSoapAction(controlUrl, "SetAVTransportURI", setUriArgs)
             if (setResult.isFailure) {
-                val simpleArgs = """
-                    <InstanceID>0</InstanceID>
-                    <CurrentURI>$escapedUri</CurrentURI>
-                    <CurrentURIMetaData></CurrentURIMetaData>
-                """.trimIndent()
-                val retryResult = sendSoapAction(controlUrl, "SetAVTransportURI", simpleArgs)
-                if (retryResult.isFailure) {
-                    return@withContext retryResult
+                // Si la TV ou Xbox est stricte et refuse SetAVTransportURI en cours de lecture sans Stop préalable (erreur 701)
+                if (!stopFirst) {
+                    try {
+                        sendSoapAction(controlUrl, "Stop", "<InstanceID>0</InstanceID>")
+                    } catch (_: Exception) {}
+                    setResult = sendSoapAction(controlUrl, "SetAVTransportURI", setUriArgs)
+                }
+
+                // Si ça échoue encore, tenter avec métadonnées simplifiées (DIDL vide)
+                if (setResult.isFailure) {
+                    val simpleArgs = """
+                        <InstanceID>0</InstanceID>
+                        <CurrentURI>$escapedUri</CurrentURI>
+                        <CurrentURIMetaData></CurrentURIMetaData>
+                    """.trimIndent()
+                    val retryResult = sendSoapAction(controlUrl, "SetAVTransportURI", simpleArgs)
+                    if (retryResult.isFailure) {
+                        return@withContext retryResult
+                    }
                 }
             }
 
