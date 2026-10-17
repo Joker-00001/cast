@@ -1728,10 +1728,13 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         lifecycleScope.launch {
             try {
                 if (prepared.isHls && prepared.segments.isNotEmpty()) {
+                    // Fermer immédiatement la connexion en cours pour que la TV charge instantanément la nouvelle position
+                    localStreamProxy.terminateStreamSockets(prepared.id)
                     val actualStartSec = withContext(Dispatchers.IO) {
                         localStreamProxy.warmupForSeek(prepared, targetSec)
                     }
                     currentPlaybackSec = actualStartSec
+                    CastForegroundService.currentPositionSec = actualStartSec
                     updateTimerDisplay()
 
                     val newStreamUrl = localStreamProxy.buildPlaybackUrl(prepared, actualStartSec)
@@ -1799,7 +1802,6 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             var tvConfirmedPlaying = false
             var secondsWithoutTvProgress = 0
             var stuckWarningShown = false
-            var streamStartTick = 0
             while (isActive && activePreparedStream != null) {
                 delay(1000)
                 val prepared = activePreparedStream ?: break
@@ -1809,7 +1811,6 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     tvConfirmedPlaying = false
                     secondsWithoutTvProgress = 0
                     stuckWarningShown = false
-                    streamStartTick = tickCount
                 }
                 if (!isXboxPaused && !isSeekingNow && currentPlaybackSec < prepared.totalDurationSec) {
                     val serviceSec = CastForegroundService.currentPositionSec
@@ -1820,29 +1821,18 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     tickCount++
                     if (!tvConfirmedPlaying) secondsWithoutTvProgress++
 
-                    // SYNCHRO TV : toutes les 5s, lire la VRAIE position sur la TV et corriger le chrono
-                    if (tickCount % 5 == 0) {
+                    // Vérifier si la TV a bien démarré la lecture (sans écraser le chrono qui gère les sauts)
+                    if (tickCount % 5 == 0 && !tvConfirmedPlaying) {
                         val ipSync = binding.etXboxIp.text?.toString()?.trim() ?: ""
-                        val streamIdAtQuery = prepared.id
                         if (ipSync.isNotBlank()) {
                             val tvSec = dlnaController.getElapsedSeconds(ipSync)
-                            val ticksOnThisStream = tickCount - streamStartTick
-                            val plausible = tvSec <= currentPlaybackSec + 45
-                            if (tvSec > 0 && plausible && ticksOnThisStream >= 8 &&
-                                activePreparedStream?.id == streamIdAtQuery && !isSeekingNow
-                            ) {
+                            if (tvSec > 0) {
                                 tvConfirmedPlaying = true
                                 secondsWithoutTvProgress = 0
                                 if (stuckWarningShown) {
                                     stuckWarningShown = false
                                     updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
                                     binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))
-                                }
-                                if (kotlin.math.abs(tvSec - currentPlaybackSec) > 3) {
-                                    currentPlaybackSec = tvSec.coerceAtMost(prepared.totalDurationSec)
-                                    CastForegroundService.currentPositionSec = currentPlaybackSec
-                                    prepared.currentConfirmedPlaybackSec = currentPlaybackSec
-                                    updateTimerDisplay()
                                 }
                             }
                         }

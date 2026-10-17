@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Xbox Video Caster</string>
+    <string name="app_name">CastFlow</string>
     <string name="title_xbox_ip">Adresse IP de la Xbox</string>
     <string name="title_video_url">URL de la vidéo / Page web</string>
     <string name="btn_cast">LANCER SUR XBOX</string>
