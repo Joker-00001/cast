@@ -307,7 +307,8 @@ class DlnaController(
         ip: String,
         videoUri: String,
         title: String = "Xbox Video Stream",
-        durationSeconds: Int = 1440
+        durationSeconds: Int = 1440,
+        stopFirst: Boolean = true
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val controlUrl = resolveXboxControlUrl(ip)
@@ -321,9 +322,11 @@ class DlnaController(
                 "http-get:*:video/mp4:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             }
 
-            try {
-                sendSoapAction(controlUrl, "Stop", "<InstanceID>0</InstanceID>")
-            } catch (_: Exception) {
+            if (stopFirst) {
+                try {
+                    sendSoapAction(controlUrl, "Stop", "<InstanceID>0</InstanceID>")
+                } catch (_: Exception) {
+                }
             }
 
             val didlLiteMetadata = escapeXml(

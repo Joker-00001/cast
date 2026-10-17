@@ -87,6 +87,12 @@ class VideoStreamSniffer(private val context: Context) {
         fun isNavigationAllowed(targetUrl: String): Boolean {
             val lower = targetUrl.lowercase(Locale.ROOT)
             if (isAdUrl(lower)) return false
+            if (lower.contains("anime-sama.") || lower.contains("french-stream.") || lower.contains("fstream.") || lower.contains("french-manga.")) {
+                return true
+            }
+            if (Regex("(?i)https?://[^/]*fs\\d+\\.").containsMatchIn(targetUrl)) {
+                return true
+            }
             return ALLOWED_NAVIGATION_DOMAINS.any { lower.contains(it) }
         }
 
@@ -186,8 +192,8 @@ class VideoStreamSniffer(private val context: Context) {
                 }
             }
 
-            // 3. Est-ce une page de film/série French Stream (fs26.lol) ?
-            if (url.contains("fs26.") || url.contains("french-stream.")) {
+            // 3. Est-ce une page de film/série French Stream ?
+            if (url.contains("french-stream.") || url.contains("fstream.") || Regex("(?i)fs\\d+\\.").containsMatchIn(url)) {
                 val fsExtracted = tryExtractFromFrenchStreamPage(url)
                 if (fsExtracted != null) {
                     return@withContext Result.success(fsExtracted)
@@ -248,12 +254,102 @@ class VideoStreamSniffer(private val context: Context) {
         }
     }
 
+    /**
+     * Résout l'épisode suivant sur Anime-Sama de façon 100% autonome en tâche de fond (hors WebView),
+     * permettant de pré-charger l'épisode même si le téléphone a son écran éteint en veille !
+     */
+    fun resolveAnimeSamaNextEpisodeStream(pageUrl: String, nextEpisodeIndex: Int): Pair<String, String>? {
+        return try {
+            val cleanBase = pageUrl.substringBefore("?").substringBefore("#").trimEnd('/')
+            val episodesJsUrl = "$cleanBase/episodes.js"
+            val req = Request.Builder()
+                .url(episodesJsUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", pageUrl)
+                .build()
+
+            val jsContent = httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string() ?: return null
+            }
+
+            val pattern = Pattern.compile("""var\s+(eps\d+)\s*=\s*\[(.*?)\];""", Pattern.DOTALL)
+            val matcher = pattern.matcher(jsContent)
+            val allReaderLists = mutableListOf<List<String>>()
+
+            while (matcher.find()) {
+                val arrayContent = matcher.group(2) ?: continue
+                val strMatcher = Pattern.compile("""['"](https?://[^'"]+)['"]""").matcher(arrayContent)
+                val list = mutableListOf<String>()
+                while (strMatcher.find()) {
+                    strMatcher.group(1)?.let { list.add(it) }
+                }
+                if (list.isNotEmpty()) {
+                    allReaderLists.add(list)
+                }
+            }
+
+            if (allReaderLists.isEmpty()) return null
+
+            var chosenEmbed: String? = null
+
+            // Priorité 1 : ansembed.net (HLS direct rapide)
+            for (readerList in allReaderLists) {
+                if (nextEpisodeIndex in readerList.indices) {
+                    val candidate = readerList[nextEpisodeIndex]
+                    if (candidate.contains("ansembed.net")) {
+                        chosenEmbed = candidate
+                        break
+                    }
+                }
+            }
+
+            // Priorité 2 : vidmoly
+            if (chosenEmbed == null) {
+                for (readerList in allReaderLists) {
+                    if (nextEpisodeIndex in readerList.indices) {
+                        val candidate = readerList[nextEpisodeIndex]
+                        if (candidate.contains("vidmoly")) {
+                            chosenEmbed = candidate.replace("vidmoly.to", "vidmoly.biz").replace("vidmoly.net", "vidmoly.biz")
+                            break
+                        }
+                    }
+                }
+            }
+
+            // Priorité 3 : tout lecteur disponible pour cet index
+            if (chosenEmbed == null) {
+                for (readerList in allReaderLists) {
+                    if (nextEpisodeIndex in readerList.indices) {
+                        chosenEmbed = readerList[nextEpisodeIndex]
+                        break
+                    }
+                }
+            }
+
+            if (!chosenEmbed.isNullOrBlank()) {
+                tryExtractDirectStreamFromEmbedHtml(chosenEmbed, pageUrl)
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun tryExtractFromFrenchStreamPage(pageUrl: String): Pair<String, String>? {
         return try {
+            val pageOrigin = try {
+                val uri = java.net.URI(pageUrl)
+                "${uri.scheme}://${uri.host}/"
+            } catch (_: Exception) {
+                "https://fs26.lol/"
+            }
+
             val req = Request.Builder()
                 .url(pageUrl)
                 .header("User-Agent", USER_AGENT)
-                .header("Referer", "https://fs26.lol/")
+                .header("Referer", pageOrigin)
                 .build()
 
             val html = httpClient.newCall(req).execute().use { resp ->
@@ -277,8 +373,9 @@ class VideoStreamSniffer(private val context: Context) {
             if (idMatcher.find()) {
                 val newsId = idMatcher.group(1) ?: idMatcher.group(2)
                 if (!newsId.isNullOrBlank()) {
+                    val apiUrl = "${pageOrigin.trimEnd('/')}/engine/ajax/film_api.php?id=$newsId"
                     val apiReq = Request.Builder()
-                        .url("https://fs26.lol/engine/ajax/film_api.php?id=$newsId")
+                        .url(apiUrl)
                         .header("User-Agent", USER_AGENT)
                         .header("Referer", pageUrl)
                         .build()
@@ -425,7 +522,7 @@ class VideoStreamSniffer(private val context: Context) {
                             (function() {
                                 try {
                                     var iframe = document.getElementById('playerDF') || document.getElementById('player-frame') || document.querySelector('iframe[src*="embed"], iframe[src*="vidmoly"], iframe[src*="ansembed"], iframe[src*="sendvid"], iframe[src*="fsvid"], iframe[src*="vidzy"]');
-                                    if (iframe && iframe.src && iframe.src.startsWith('http') && (window.location.href.indexOf('anime-sama') !== -1 || window.location.href.indexOf('fs26') !== -1)) {
+                                    if (iframe && iframe.src && iframe.src.startsWith('http') && (/(anime-sama|french-stream|fs\d+|fstream)/i.test(window.location.href))) {
                                         window.location.href = iframe.src;
                                         return;
                                     }

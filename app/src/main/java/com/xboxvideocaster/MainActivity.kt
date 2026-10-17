@@ -41,6 +41,7 @@ import com.xboxvideocaster.extractor.AniSkipClient
 import com.xboxvideocaster.extractor.VideoStreamSniffer
 import com.xboxvideocaster.extractor.YouTubeExtractor
 import com.xboxvideocaster.updater.AppUpdater
+import com.xboxvideocaster.updater.RemoteDomainSync
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -69,6 +70,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     private lateinit var videoStreamSniffer: VideoStreamSniffer
     private lateinit var localStreamProxy: LocalStreamProxy
     private lateinit var appUpdater: AppUpdater
+    private lateinit var remoteDomainSync: RemoteDomainSync
 
     @Volatile
     private var lastDetectedStreamUrl: String? = null
@@ -109,9 +111,17 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     private var isUserDraggingSeekBar: Boolean = false
     private var positionTrackerJob: Job? = null
 
-    // Option : Épisode suivant automatique à la fin
+    // Option : Épisode suivant automatique à la fin avec pré-chargement anti-coupure
     private var isAutoNextEnabled: Boolean = false
     private var autoNextTriggeredForStreamId: String? = null
+    @Volatile
+    private var preloadedNextPreparedStream: LocalStreamProxy.PreparedStream? = null
+    @Volatile
+    private var preloadedNextTitle: String? = null
+    @Volatile
+    private var isPreloadingNextEpisode: Boolean = false
+    @Volatile
+    private var preloadedForEpisodeIndex: Int = -1
 
     // Mode Plein Écran Paysage sur le téléphone
     private var customFullscreenView: View? = null
@@ -131,8 +141,6 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         private const val KEY_LAST_CAST_POS_SEC = "key_last_cast_pos_sec"
         private const val KEY_FAVORITES_JSON = "key_favorites_json"
         private const val DEFAULT_XBOX_IP = "192.168.1.52"
-        private const val ANIME_SAMA_HOME = "https://anime-sama.to/"
-        private const val FRENCH_STREAM_HOME = "https://fs26.lol/"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -141,10 +149,15 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         setContentView(binding.root)
 
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        remoteDomainSync = RemoteDomainSync(this, prefs)
         videoStreamSniffer = VideoStreamSniffer(this)
         localStreamProxy = LocalStreamProxy.getInstance(this)
         appUpdater = AppUpdater(this)
         CastForegroundService.remoteActionListener = this
+
+        lifecycleScope.launch {
+            remoteDomainSync.syncDomainsFromRemote()
+        }
 
         requestNotificationPermissionIfNeeded()
         setupIpAndPreferences()
@@ -377,7 +390,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         lifecycleScope.launch(Dispatchers.IO) {
                             val extracted = videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(
                                 iframeSrc,
-                                pageReferer.ifBlank { "https://anime-sama.to/" }
+                                pageReferer.ifBlank { remoteDomainSync.getAnimeSamaUrl() }
                             )
                             if (extracted != null && VideoStreamSniffer.isVideoStreamUrl(extracted.first)) {
                                 onNewVideoStreamFound(extracted.first, extracted.second)
@@ -389,7 +402,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 @JavascriptInterface
                 fun onPageMetadataDetected(pageTitle: String, epNum: Int, epIdx: Int, epLabel: String, pageUrl: String) {
                     val cleanTitle = pageTitle
-                        .replace(Regex("(?i)\\s*[-|•]\\s*(anime-sama|french-stream|fs26).*"), "")
+                        .replace(Regex("(?i)\\s*[-|•]\\s*(anime-sama|french-stream|fstream|fs\\d+).*"), "")
                         .trim()
                     val changedEp = (epNum != currentEpisodeNumber || epIdx != currentEpisodeIndex || cleanTitle != currentPageTitle)
                     currentPageTitle = cleanTitle
@@ -406,18 +419,31 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 @JavascriptInterface
                 fun onAutoNextEpisodeReady(nextEmbedOrPageUrl: String, pageReferer: String) {
                     val ip = binding.etXboxIp.text?.toString()?.trim() ?: DEFAULT_XBOX_IP
-                    runOnUiThread {
-                        updateStatus("⏭ Passage automatique à l'épisode suivant...", isLoading = true)
-                    }
                     lifecycleScope.launch(Dispatchers.IO) {
                         val extracted = videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(
                             nextEmbedOrPageUrl,
-                            pageReferer.ifBlank { "https://anime-sama.to/" }
+                            pageReferer.ifBlank { remoteDomainSync.getAnimeSamaUrl() }
                         )
                         if (extracted != null && VideoStreamSniffer.isVideoStreamUrl(extracted.first)) {
                             lastDetectedStreamUrl = extracted.first
                             lastDetectedReferer = extracted.second
-                            sendStreamToXbox(extracted.first, extracted.second, ip, forceStartFromZero = true)
+
+                            val current = activePreparedStream
+                            if (current != null && currentPlaybackSec < current.totalDurationSec - 5) {
+                                val nextPrepared = localStreamProxy.prepareStream(
+                                    extracted.first,
+                                    extracted.second,
+                                    VideoStreamSniffer.USER_AGENT,
+                                    activeStreamToKeep = current
+                                )
+                                preloadedNextPreparedStream = nextPrepared
+                                preloadedNextTitle = currentPageTitle
+                                runOnUiThread {
+                                    updateStatus("⏭ Épisode suivant pré-chargé en mémoire ! Transition fluide à la fin...", isLoading = false)
+                                }
+                            } else {
+                                sendStreamToXbox(extracted.first, extracted.second, ip, forceStartFromZero = true, stopFirst = false)
+                            }
                         } else {
                             withContext(Dispatchers.Main) {
                                 startExtractionAndCast(nextEmbedOrPageUrl, ip)
@@ -501,12 +527,16 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     if (!url.isNullOrBlank()) {
                         binding.etVideoUrl.setText(url)
                         prefs.edit().putString(KEY_LAST_PAGE, url).apply()
+                        remoteDomainSync.checkAndSaveVisitedUrl(url)
                     }
                     view?.evaluateJavascript("window.open = function(){ return null; };", null)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    if (!url.isNullOrBlank()) {
+                        remoteDomainSync.checkAndSaveVisitedUrl(url)
+                    }
                     injectSmartSiteWatcher()
                 }
             }
@@ -774,17 +804,18 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         }
 
         binding.cardSelectAnimeSama.setOnClickListener {
-            loadBrowserUrl(ANIME_SAMA_HOME)
+            loadBrowserUrl(remoteDomainSync.getAnimeSamaUrl())
         }
 
         binding.cardSelectFrenchStream.setOnClickListener {
-            loadBrowserUrl(FRENCH_STREAM_HOME)
+            loadBrowserUrl(remoteDomainSync.getFrenchStreamUrl())
         }
 
         binding.btnResumeLastPage.setOnClickListener {
             val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
             val savedCastEpIdx = prefs.getInt(KEY_LAST_CAST_EP_IDX, -1)
-            val savedPage = savedCastPage ?: prefs.getString(KEY_LAST_PAGE, ANIME_SAMA_HOME) ?: ANIME_SAMA_HOME
+            val defaultAs = remoteDomainSync.getAnimeSamaUrl()
+            val savedPage = savedCastPage ?: prefs.getString(KEY_LAST_PAGE, defaultAs) ?: defaultAs
             if (savedCastEpIdx >= 0) {
                 pendingRestoreEpisodeIdx = savedCastEpIdx
             }
@@ -792,11 +823,11 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         }
 
         binding.btnHomeAnimeSama.setOnClickListener {
-            loadBrowserUrl(ANIME_SAMA_HOME)
+            loadBrowserUrl(remoteDomainSync.getAnimeSamaUrl())
         }
 
         binding.btnHomeFrenchStream.setOnClickListener {
-            loadBrowserUrl(FRENCH_STREAM_HOME)
+            loadBrowserUrl(remoteDomainSync.getFrenchStreamUrl())
         }
 
         // --- Favoris & Séries en cours (1 clic) ---
@@ -1106,10 +1137,12 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     private fun showFavoritesDialog() {
         val favs = loadFavorites()
         val currentUrl = binding.webViewBrowser.url ?: ""
+        val asHome = remoteDomainSync.getAnimeSamaUrl()
+        val fsHome = remoteDomainSync.getFrenchStreamUrl()
         val isOnSitePage = binding.layoutHomeHub.visibility != View.VISIBLE &&
             currentUrl.startsWith("http") &&
-            currentUrl != ANIME_SAMA_HOME &&
-            currentUrl != FRENCH_STREAM_HOME
+            currentUrl.trimEnd('/') != asHome.trimEnd('/') &&
+            currentUrl.trimEnd('/') != fsHome.trimEnd('/')
 
         val options = mutableListOf<String>()
         if (isOnSitePage) {
@@ -1343,15 +1376,106 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     }
 
     /**
-     * Passe automatiquement à l'épisode suivant dans la page (Anime-Sama ou French Stream)
-     * et lance immédiatement sa diffusion sur la TV / Xbox.
+     * Pré-charge l'épisode suivant en arrière-plan (25s avant la fin de l'épisode en cours) :
+     * 1. Sur Anime-Sama : résolution pure Kotlin de l'épisode suivant via episodes.js (fonctionne même écran éteint / en veille !)
+     * 2. Sur French Stream : déclenchement du script dans la WebView
+     * 3. Pré-télécharge les 2 premiers segments de l'épisode suivant en RAM
+     * -> Permet un enchaînement instantané à 0:00 SANS fermer le lecteur DLNA et SANS perte de signal TV !
      */
-    private fun triggerAutoNextEpisode() {
+    private fun preloadNextEpisodeInBackground(currentPrepared: LocalStreamProxy.PreparedStream) {
+        if (isPreloadingNextEpisode) return
+        isPreloadingNextEpisode = true
+        val pageUrl = binding.webViewBrowser.url ?: ""
+        val nextIdx = currentEpisodeIndex + 1
+
         runOnUiThread {
-            updateStatus("⏭ Fin de l'épisode : lancement automatique de l'épisode suivant...", isLoading = true)
-            Toast.makeText(this, "⏭ Passage automatique à l'épisode suivant !", Toast.LENGTH_SHORT).show()
+            updateStatus("⏳ Pré-chargement de l'épisode suivant en arrière-plan...", isLoading = false)
         }
 
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // 1. Sur Anime-Sama : résolution autonome sans dépendre de l'affichage du téléphone
+                if (pageUrl.contains("anime-sama.", ignoreCase = true) && nextIdx > 0) {
+                    val direct = videoStreamSniffer.resolveAnimeSamaNextEpisodeStream(pageUrl, nextIdx)
+                    if (direct != null && VideoStreamSniffer.isVideoStreamUrl(direct.first)) {
+                        lastDetectedStreamUrl = direct.first
+                        lastDetectedReferer = direct.second
+                        val nextPrepared = localStreamProxy.prepareStream(
+                            direct.first,
+                            direct.second,
+                            VideoStreamSniffer.USER_AGENT,
+                            activeStreamToKeep = currentPrepared
+                        )
+                        preloadedNextPreparedStream = nextPrepared
+                        preloadedForEpisodeIndex = nextIdx
+                        val epLabel = "Épisode ${nextIdx + 1}"
+                        currentEpisodeIndex = nextIdx
+                        currentEpisodeLabel = epLabel
+                        preloadedNextTitle = "$currentPageTitle - $epLabel"
+                        runOnUiThread {
+                            updateStatus("⏭ $epLabel prêt en mémoire ! Enchaînement fluide à la fin...", isLoading = false)
+                        }
+                        return@launch
+                    }
+                }
+
+                // 2. Déclenchement JS dans la WebView (French Stream ou Anime-Sama fallback)
+                withContext(Dispatchers.Main) {
+                    triggerAutoNextEpisodeJs()
+                }
+            } catch (_: Exception) {
+                isPreloadingNextEpisode = false
+            }
+        }
+    }
+
+    /**
+     * Bascule instantanément sur l'épisode suivant pré-chargé (2s avant la fin)
+     * SANS envoyer d'ordre Stop pour que la TV ne ferme jamais son lecteur vidéo !
+     */
+    private fun executeSeamlessNextEpisodeSwitch(currentPrepared: LocalStreamProxy.PreparedStream) {
+        val nextPrepared = preloadedNextPreparedStream
+        val ip = binding.etXboxIp.text?.toString()?.trim() ?: DEFAULT_XBOX_IP
+
+        if (nextPrepared != null) {
+            preloadedNextPreparedStream = null
+            isPreloadingNextEpisode = false
+            activePreparedStream = nextPrepared
+            localStreamProxy.activeStream = nextPrepared
+            currentPlaybackSec = 0
+            isXboxPaused = false
+            CastForegroundService.currentPositionSec = 0
+            CastForegroundService.isPausedState = false
+
+            runOnUiThread {
+                updateStatus("⏭ Enchaînement fluide : Épisode suivant en cours...", isLoading = false)
+                updateTimerDisplay()
+                binding.btnPlayPause.text = "⏸ PAUSE"
+                Toast.makeText(this@MainActivity, "⏭ Épisode suivant lancé !", Toast.LENGTH_SHORT).show()
+            }
+
+            lifecycleScope.launch {
+                val proxiedUrl = localStreamProxy.buildPlaybackUrl(nextPrepared, startSeconds = 0)
+                val streamTitle = preloadedNextTitle ?: getDisplayStreamTitle()
+
+                // Mettre à jour AniSkip pour le nouvel épisode
+                val pageUrl = withContext(Dispatchers.Main) { binding.webViewBrowser.url ?: "" }
+                refreshAniSkipIntroForCurrentEpisode(pageUrl, currentPageTitle, currentEpisodeNumber)
+
+                dlnaController.playMediaOnXbox(
+                    ip = ip,
+                    videoUri = proxiedUrl,
+                    title = streamTitle,
+                    durationSeconds = nextPrepared.totalDurationSec,
+                    stopFirst = false // Ne pas couper le lecteur de la TV !
+                )
+            }
+        } else {
+            triggerAutoNextEpisode()
+        }
+    }
+
+    private fun triggerAutoNextEpisodeJs() {
         val jsNextEp = """
             (function() {
                 try {
@@ -1407,6 +1531,18 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     }
 
     /**
+     * Passe automatiquement à l'épisode suivant dans la page (Anime-Sama ou French Stream)
+     * et lance immédiatement sa diffusion sur la TV / Xbox.
+     */
+    private fun triggerAutoNextEpisode() {
+        runOnUiThread {
+            updateStatus("⏭ Fin de l'épisode : lancement de l'épisode suivant...", isLoading = true)
+            Toast.makeText(this, "⏭ Passage automatique à l'épisode suivant !", Toast.LENGTH_SHORT).show()
+        }
+        triggerAutoNextEpisodeJs()
+    }
+
+    /**
      * Saute exactement de +30s ou -30s dans l'épisode/film en cours sur la Xbox / TV.
      */
     private fun jumpBySeconds(deltaSec: Int) {
@@ -1425,6 +1561,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         val targetSec = rawTargetSec.coerceIn(0, maxSeekSec)
 
         isSeekingNow = true
+        preloadedNextPreparedStream = null
+        isPreloadingNextEpisode = false
         updateStatus("Saut à ${dlnaController.formatSecondsToHms(targetSec)}...", isLoading = true)
 
         lifecycleScope.launch {
@@ -1513,14 +1651,25 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         saveCurrentPlaybackProgress()
                     }
 
-                    // Si l'option "Ép. Suivant Auto" est activée et qu'on atteint la fin de l'épisode (à 3s de la fin)
+                    // 1. ANTICIPATION (25s avant la fin) : Pré-charger l'épisode suivant en tâche de fond (en RAM)
                     if (isAutoNextEnabled &&
                         prepared.totalDurationSec > 60 &&
-                        currentPlaybackSec >= prepared.totalDurationSec - 3 &&
+                        currentPlaybackSec >= prepared.totalDurationSec - 25 &&
+                        !isPreloadingNextEpisode &&
+                        preloadedNextPreparedStream == null &&
+                        autoNextTriggeredForStreamId != prepared.id
+                    ) {
+                        preloadNextEpisodeInBackground(prepared)
+                    }
+
+                    // 2. BASCULE FLUIDE (2s avant la fin) : Envoyer le flux pré-chargé SANS coupure et SANS Stop TV !
+                    if (isAutoNextEnabled &&
+                        prepared.totalDurationSec > 60 &&
+                        currentPlaybackSec >= prepared.totalDurationSec - 2 &&
                         autoNextTriggeredForStreamId != prepared.id
                     ) {
                         autoNextTriggeredForStreamId = prepared.id
-                        triggerAutoNextEpisode()
+                        executeSeamlessNextEpisodeSwitch(prepared)
                     }
                 }
             }
@@ -1605,7 +1754,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         if (input.contains(".") && !input.contains(" ")) {
             return "https://$input"
         }
-        return "https://anime-sama.to/catalogue/?search=${java.net.URLEncoder.encode(input, "UTF-8")}"
+        val asBase = remoteDomainSync.getAnimeSamaUrl().trimEnd('/')
+        return "$asBase/catalogue/?search=${java.net.URLEncoder.encode(input, "UTF-8")}"
     }
 
     private fun loadBrowserUrl(url: String) {
@@ -1662,7 +1812,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
 
         lifecycleScope.launch {
             val iframeUrl = withContext(Dispatchers.Main) { currentIframeEmbedUrl }
-            val pageRef = withContext(Dispatchers.Main) { binding.webViewBrowser.url ?: "https://anime-sama.to/" }
+            val pageRef = withContext(Dispatchers.Main) { binding.webViewBrowser.url ?: remoteDomainSync.getAnimeSamaUrl() }
             if (!iframeUrl.isNullOrBlank()) {
                 val extractedFromIframe = withContext(Dispatchers.IO) {
                     videoStreamSniffer.tryExtractDirectStreamFromEmbedHtml(iframeUrl, pageRef)
@@ -1701,7 +1851,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         rawStreamUrl: String,
         referer: String,
         xboxIp: String,
-        forceStartFromZero: Boolean = false
+        forceStartFromZero: Boolean = false,
+        stopFirst: Boolean = true
     ) {
         val currentPageUrl = binding.webViewBrowser.url ?: ""
         val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
@@ -1721,10 +1872,10 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     .setTitle("⏳ Reprendre où vous en étiez ?")
                     .setMessage("Vous aviez arrêté cet épisode/film à $fmtTime.\nVoulez-vous reprendre directement à $fmtTime ?")
                     .setPositiveButton("▶ Reprendre à $fmtTime") { _, _ ->
-                        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = savedCastSec)
+                        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = savedCastSec, stopFirst = stopFirst)
                     }
                     .setNegativeButton("Recommencer (0:00)") { _, _ ->
-                        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = 0)
+                        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = 0, stopFirst = stopFirst)
                     }
                     .setCancelable(false)
                     .show()
@@ -1732,14 +1883,15 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             return
         }
 
-        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = 0)
+        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = 0, stopFirst = stopFirst)
     }
 
     private fun executeStreamCastToDevice(
         rawStreamUrl: String,
         referer: String,
         xboxIp: String,
-        initialStartSec: Int = 0
+        initialStartSec: Int = 0,
+        stopFirst: Boolean = true
     ) {
         runOnUiThread {
             binding.btnCast.isEnabled = false
@@ -1783,7 +1935,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 ip = xboxIp,
                 videoUri = proxiedUrl,
                 title = streamTitle,
-                durationSeconds = prepared.totalDurationSec
+                durationSeconds = prepared.totalDurationSec,
+                stopFirst = stopFirst
             )
 
             castResult.onSuccess {

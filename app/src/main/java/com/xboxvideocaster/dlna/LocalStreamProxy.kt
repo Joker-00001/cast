@@ -120,23 +120,37 @@ class LocalStreamProxy(private val context: Context) {
         }
     }
 
-    private fun clearSegmentCache() {
-        for (f in segmentFutures.values) {
-            try {
-                f.cancel(true)
-            } catch (_: Exception) {
+    fun clearSegmentCacheExcept(keepStream: PreparedStream?) {
+        val keepUrls = keepStream?.segments?.map { it.url }?.toSet() ?: emptySet()
+        val it = segmentFutures.entries.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (!keepUrls.contains(entry.key)) {
+                try {
+                    entry.value.cancel(true)
+                } catch (_: Exception) {
+                }
+                it.remove()
             }
         }
-        segmentFutures.clear()
+    }
+
+    private fun clearSegmentCache() {
+        clearSegmentCacheExcept(null)
     }
 
     /**
      * Analyse la vidéo, prépare les segments, la durée totale et pré-charge les 2 premiers segments
      * en RAM avant d'envoyer l'ordre de lecture à la TV / Xbox.
      */
-    fun prepareStream(realStreamUrl: String, referer: String?, userAgent: String?): PreparedStream {
+    fun prepareStream(
+        realStreamUrl: String,
+        referer: String?,
+        userAgent: String?,
+        activeStreamToKeep: PreparedStream? = null
+    ): PreparedStream {
         start()
-        clearSegmentCache()
+        clearSegmentCacheExcept(activeStreamToKeep ?: activeStream)
 
         val ref = resolveBestReferer(realStreamUrl, referer)
         val ua = if (!userAgent.isNullOrBlank()) userAgent else
@@ -465,6 +479,12 @@ class LocalStreamProxy(private val context: Context) {
             }
             out.flush()
         }
+
+        // Une fois tous les segments envoyés, maintenir le socket ouvert quelques secondes
+        // pour laisser la Smart TV vider complètement son buffer matériel sans coupure brutale
+        try {
+            Thread.sleep(8000)
+        } catch (_: Exception) {}
     }
 
     /**
