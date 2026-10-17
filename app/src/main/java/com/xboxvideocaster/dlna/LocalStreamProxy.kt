@@ -3,28 +3,34 @@ package com.xboxvideocaster.dlna
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
+import okhttp3.ConnectionPool
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.io.OutputStream
-import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import java.util.Locale
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Serveur Proxy & Pre-fetcheur haute performance pour Xbox One / Series :
- * 1. Télécharge en avance (Pre-fetch parallèle) les segments .ts en RAM pour éliminer
- *    les micro-freezes et empêcher l'apparition/disparition du menu OSD de la Xbox !
- * 2. Calcule la durée exacte de l'épisode (via #EXTINF) et permet de sauter à n'importe quelle
- *    seconde (+30s / -30s) instantanément !
+ * Serveur Proxy & Remuxeur MPEG-TS haute performance pour Xbox One / Series :
+ * 1. Pool HTTP/2 persistant (OkHttp) + déduplication des téléchargements en cours (Future)
+ *    pour ne jamais télécharger deux fois le même segment.
+ * 2. Pré-chargement de 2 segments complets (20s) avant le démarrage et 6 segments (60s) d'avance en RAM.
+ * 3. Nettoyage MPEG-TS (ISO 13818-1) : supprime les paquets de bourrage illégaux (AFC=3, alen=183)
+ *    générés par nginx-vod-module à la fin de chaque segment .ts et ré-indexe les Continuity Counters (CC)
+ *    en continu -> élimine les micro-freezes de 0.5s et empêche le menu OSD de la TV de pop/dépop en boucle !
  */
 class LocalStreamProxy(private val context: Context) {
 
@@ -50,9 +56,15 @@ class LocalStreamProxy(private val context: Context) {
         val totalDurationSec: Int
     )
 
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .build()
+
     private val streamRegistry = ConcurrentHashMap<String, PreparedStream>()
-    private val segmentRamCache = ConcurrentHashMap<String, ByteArray>()
-    private val prefetchFetchingSet = ConcurrentHashMap.newKeySet<String>()
+    private val segmentFutures = ConcurrentHashMap<String, Future<ByteArray?>>()
     private val prefetchPool = Executors.newFixedThreadPool(4)
 
     fun start() {
@@ -81,26 +93,36 @@ class LocalStreamProxy(private val context: Context) {
 
     fun stop() {
         isRunning = false
-        segmentRamCache.clear()
+        clearSegmentCache()
         try {
             serverSocket?.close()
         } catch (_: Exception) {
         }
     }
 
+    private fun clearSegmentCache() {
+        for (f in segmentFutures.values) {
+            try {
+                f.cancel(true)
+            } catch (_: Exception) {
+            }
+        }
+        segmentFutures.clear()
+    }
+
     /**
-     * Analyse la vidéo et prépare les segments et la durée totale avant l'envoi à la Xbox.
+     * Analyse la vidéo, prépare les segments, la durée totale et pré-charge les 2 premiers segments
+     * en RAM avant d'envoyer l'ordre de lecture à la Xbox.
      */
     fun prepareStream(realStreamUrl: String, referer: String?, userAgent: String?): PreparedStream {
         start()
-        segmentRamCache.clear()
-        prefetchFetchingSet.clear()
+        clearSegmentCache()
 
-        val ref = if (!referer.isNullOrBlank()) referer else "https://anime-sama.to/"
+        val ref = resolveBestReferer(realStreamUrl, referer)
         val ua = if (!userAgent.isNullOrBlank()) userAgent else
             "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-        val id = "vid_" + System.currentTimeMillis()
+        val id = "vid" + System.currentTimeMillis()
         val isHls = realStreamUrl.contains(".m3u8", ignoreCase = true) ||
                 realStreamUrl.contains("urlset", ignoreCase = true)
 
@@ -119,20 +141,60 @@ class LocalStreamProxy(private val context: Context) {
             userAgent = ua,
             isHls = isHls,
             segments = segments,
-            totalDurationSec = if (totalDuration > 0) totalDuration else 1440 // 24 min par défaut
+            totalDurationSec = if (totalDuration > 0) totalDuration else 1440
         )
         streamRegistry[id] = prepared
 
-        // Pré-charger immédiatement les 4 premiers segments en RAM pour un démarrage instantané
+        // Pré-charger les 6 premiers segments et attendre que les 2 premiers (20s de vidéo) soient prêts en RAM !
         if (segments.isNotEmpty()) {
-            triggerPrefetch(prepared, 0, 4)
+            triggerPrefetch(prepared, 0, 6)
+            val prebufferCount = min(2, segments.size)
+            for (i in 0 until prebufferCount) {
+                try {
+                    ensureSegmentDownload(segments[i].url, prepared.referer, prepared.userAgent)
+                        .get(8, TimeUnit.SECONDS)
+                } catch (_: Exception) {
+                }
+            }
         }
 
         return prepared
     }
 
     /**
-     * Génère l'URL proxy démarrant à `startSeconds` (pour le lancement ou le saut +30s / -30s)
+     * Pré-charge la zone cible avant un saut (+30s / -30s)
+     */
+    fun warmupForSeek(prepared: PreparedStream, targetSec: Int): Int {
+        if (!prepared.isHls || prepared.segments.isEmpty()) return targetSec
+        val startIndex = prepared.segments.indexOfLast { it.startTimeSec <= targetSec }.coerceAtLeast(0)
+        triggerPrefetch(prepared, startIndex, 5)
+        try {
+            ensureSegmentDownload(
+                prepared.segments[startIndex].url,
+                prepared.referer,
+                prepared.userAgent
+            ).get(6, TimeUnit.SECONDS)
+        } catch (_: Exception) {
+        }
+        return prepared.segments[startIndex].startTimeSec.toInt()
+    }
+
+    private fun resolveBestReferer(streamUrl: String, pageReferer: String?): String {
+        val lower = streamUrl.lowercase(Locale.ROOT)
+        return when {
+            lower.contains("fsvid") -> "https://fsvid.lol/"
+            lower.contains("vidzy") -> "https://vidzy.cc/"
+            lower.contains("vmnow") || lower.contains("ansembed") -> "https://ansembed.net/"
+            lower.contains("vidmoly") -> "https://vidmoly.to/"
+            lower.contains("sibnet") -> "https://video.sibnet.ru/"
+            lower.contains("sendvid") -> "https://sendvid.com/"
+            !pageReferer.isNullOrBlank() -> pageReferer
+            else -> "https://anime-sama.to/"
+        }
+    }
+
+    /**
+     * Génère l'URL proxy démarrant à `startSeconds` (ex: /xbox/vid123456_s90.ts)
      */
     fun buildPlaybackUrl(prepared: PreparedStream, startSeconds: Int = 0): String {
         val localIp = getLocalIpAddress() ?: "127.0.0.1"
@@ -193,7 +255,7 @@ class LocalStreamProxy(private val context: Context) {
         socket.use { client ->
             try {
                 client.soTimeout = 30000
-                client.sendBufferSize = 262144 // 256 KB socket buffer pour fluidité maximale
+                client.sendBufferSize = 524288 // 512 KB socket buffer
                 client.tcpNoDelay = true
 
                 val input = client.getInputStream().bufferedReader()
@@ -211,7 +273,6 @@ class LocalStreamProxy(private val context: Context) {
                     }
                 }
 
-                // Extraire l'ID du flux et l'offset de départ (ex: vid_123456_s90)
                 val token = path.substringAfter("/xbox/")
                     .substringBefore(".ts")
                     .substringBefore(".mp4")
@@ -235,8 +296,9 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
-     * Envoie les segments MPEG-TS en continu avec pré-chargement parallèle (4 segments d'avance en RAM).
-     * Zéro temps mort entre les segments -> plus aucun mini-freeze ni menu Xbox qui pop !
+     * Envoie les segments MPEG-TS en continu avec :
+     * - DLNA.ORG_OP=00 (flux continu pur : empêche la Xbox de couper/sonder le flux toutes les 10s !)
+     * - Filtrage des paquets illégaux (AFC=3, alen=183) et continuité stricte des compteurs CC MPEG-TS !
      */
     private fun serveBufferedHlsStream(
         method: String,
@@ -248,7 +310,7 @@ class LocalStreamProxy(private val context: Context) {
             append("HTTP/1.1 200 OK\r\n")
             append("Content-Type: video/vnd.dlna.mpeg-tts\r\n")
             append("transferMode.dlna.org: Streaming\r\n")
-            append("contentFeatures.dlna.org: DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+            append("contentFeatures.dlna.org: DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
             append("Connection: close\r\n\r\n")
         }
@@ -260,74 +322,140 @@ class LocalStreamProxy(private val context: Context) {
         val segments = prepared.segments
         if (segments.isEmpty()) return
 
-        // Trouver le segment correspondant à startSec (pour +30s / -30s)
         val startIndex = segments.indexOfLast { it.startTimeSec <= startSec }.coerceAtLeast(0)
+        // Table des Continuity Counters (CC 0..15) par PID pour un flux MPEG-TS 100% continu sans coupure
+        val pidContinuityMap = HashMap<Int, Int>()
 
         for (i in startIndex until segments.size) {
-            // Lancer le pré-téléchargement des 5 segments suivants en parallèle
-            triggerPrefetch(prepared, i + 1, 5)
+            // Pré-charger les 6 segments suivants (60 secondes d'avance en RAM !)
+            triggerPrefetch(prepared, i + 1, 6)
 
-            // Nettoyer les anciens segments déjà lus de la RAM pour économiser la mémoire
-            if (i - 2 >= 0) {
-                segmentRamCache.remove(segments[i - 2].url)
+            // Conserver les 4 derniers segments en RAM (pour les doubles requêtes Xbox et le recul -30s)
+            if (i - 4 >= 0) {
+                segmentFutures.remove(segments[i - 4].url)
             }
 
             val segUrl = segments[i].url
-            val cachedBytes = segmentRamCache.remove(segUrl)
+            val rawBytes = try {
+                ensureSegmentDownload(segUrl, prepared.referer, prepared.userAgent)
+                    .get(25, TimeUnit.SECONDS)
+            } catch (_: Exception) {
+                null
+            } ?: continue
 
-            if (cachedBytes != null) {
-                // Déjà en RAM : envoi instantané (0 ms d'attente !)
-                out.write(cachedBytes)
-                out.flush()
-            } else {
-                // Téléchargement direct si pas encore fini en RAM
-                val downloaded = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent)
-                if (downloaded != null) {
-                    out.write(downloaded)
-                    out.flush()
+            val cleanBytes = sanitizeTsSegment(rawBytes, pidContinuityMap, isFirstSegment = (i == startIndex))
+            out.write(cleanBytes)
+            out.flush()
+        }
+    }
+
+    /**
+     * Nettoie un segment MPEG-TS (paquets de 188 octets) :
+     * 1. Supprime les paquets de bourrage illégaux (AFC=3 avec adaptation_field_length >= 183)
+     *    qui provoquaient une erreur de démultiplexage sur la Xbox (mini-freeze de 0.5s + apparition du menu OSD).
+     * 2. Ré-indexe de façon continue le Continuity Counter (4 bits de poids faible de l'octet 3) pour chaque PID.
+     */
+    private fun sanitizeTsSegment(
+        raw: ByteArray,
+        ccMap: HashMap<Int, Int>,
+        isFirstSegment: Boolean
+    ): ByteArray {
+        if (raw.size < 188 || raw.size % 188 != 0) return raw
+
+        val outBuf = ByteArray(raw.size)
+        var outPos = 0
+        val totalPackets = raw.size / 188
+
+        for (p in 0 until totalPackets) {
+            val off = p * 188
+            if (raw[off] != 0x47.toByte()) {
+                System.arraycopy(raw, off, outBuf, outPos, 188)
+                outPos += 188
+                continue
+            }
+
+            val pid = ((raw[off + 1].toInt() and 0x1F) shl 8) or (raw[off + 2].toInt() and 0xFF)
+            val afc = (raw[off + 3].toInt() ushr 4) and 0x03
+
+            // Ignorer les paquets de bourrage invalides (AFC=3 mais adaptation_field_length >= 183 -> 0 octet de payload)
+            if (afc == 3) {
+                val alen = raw[off + 4].toInt() and 0xFF
+                if (alen >= 183) {
+                    continue
                 }
             }
+
+            // Ignorer les paquets de bourrage purs (PID 0x1FFF)
+            if (pid == 0x1FFF) {
+                continue
+            }
+
+            System.arraycopy(raw, off, outBuf, outPos, 188)
+
+            // Désactiver le flag de discontinuité éventuel pour éviter que l'OSD Xbox ne s'affiche
+            if (!isFirstSegment && (afc == 2 || afc == 3)) {
+                val alen = outBuf[outPos + 4].toInt() and 0xFF
+                if (alen > 0) {
+                    outBuf[outPos + 5] = (outBuf[outPos + 5].toInt() and 0x7F).toByte()
+                }
+            }
+
+            // Mettre à jour le Continuity Counter (CC) uniquement si le paquet contient un payload (AFC == 1 ou 3)
+            if (afc == 1 || afc == 3) {
+                val prevCc = ccMap[pid]
+                val nextCc = if (prevCc == null) {
+                    outBuf[outPos + 3].toInt() and 0x0F
+                } else {
+                    (prevCc + 1) and 0x0F
+                }
+                ccMap[pid] = nextCc
+                outBuf[outPos + 3] = ((outBuf[outPos + 3].toInt() and 0xF0) or nextCc).toByte()
+            }
+
+            outPos += 188
         }
+
+        return if (outPos == outBuf.size) outBuf else outBuf.copyOf(outPos)
     }
 
     private fun triggerPrefetch(prepared: PreparedStream, fromIndex: Int, count: Int) {
         val segments = prepared.segments
         val endIndex = min(segments.size, fromIndex + count)
         for (idx in fromIndex until endIndex) {
-            val segUrl = segments[idx].url
-            if (!segmentRamCache.containsKey(segUrl) && prefetchFetchingSet.add(segUrl)) {
-                prefetchPool.submit {
-                    try {
-                        val bytes = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent)
-                        if (bytes != null) {
-                            segmentRamCache[segUrl] = bytes
-                        }
-                    } finally {
-                        prefetchFetchingSet.remove(segUrl)
-                    }
-                }
-            }
+            ensureSegmentDownload(segments[idx].url, prepared.referer, prepared.userAgent)
+        }
+    }
+
+    private fun ensureSegmentDownload(
+        segUrl: String,
+        referer: String,
+        userAgent: String
+    ): Future<ByteArray?> {
+        return segmentFutures.computeIfAbsent(segUrl) {
+            prefetchPool.submit(Callable {
+                downloadSegmentBytes(segUrl, referer, userAgent)
+            })
         }
     }
 
     private fun downloadSegmentBytes(url: String, referer: String, userAgent: String): ByteArray? {
-        val conn = openConnection(url, referer, userAgent, null)
         return try {
-            if (conn.responseCode in 200..299) {
-                val baos = ByteArrayOutputStream(524288)
-                conn.inputStream.use { input ->
-                    val buf = ByteArray(32768)
-                    var read: Int
-                    while (input.read(buf).also { read = it } != -1) {
-                        baos.write(buf, 0, read)
-                    }
-                }
-                baos.toByteArray()
-            } else null
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("User-Agent", userAgent)
+                .header("Referer", referer)
+            try {
+                val refUri = URL(referer)
+                reqBuilder.header("Origin", "${refUri.protocol}://${refUri.host}")
+            } catch (_: Exception) {
+            }
+
+            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.bytes()
+            }
         } catch (_: Exception) {
             null
-        } finally {
-            conn.disconnect()
         }
     }
 
@@ -353,14 +481,21 @@ class LocalStreamProxy(private val context: Context) {
         rangeHeader: String?,
         out: OutputStream
     ) {
-        val conn = openConnection(prepared.originalUrl, prepared.referer, prepared.userAgent, rangeHeader)
-        try {
-            val code = conn.responseCode
+        val reqBuilder = Request.Builder()
+            .url(prepared.originalUrl)
+            .header("User-Agent", prepared.userAgent)
+            .header("Referer", prepared.referer)
+        if (rangeHeader != null) {
+            reqBuilder.header("Range", rangeHeader)
+        }
+
+        httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+            val code = resp.code
             val statusLine = if (code == 206) "HTTP/1.1 206 Partial Content" else "HTTP/1.1 200 OK"
-            val contentType = conn.contentType ?: "video/mp4"
-            val contentLength = conn.getHeaderField("Content-Length")
-            val contentRange = conn.getHeaderField("Content-Range")
-            val acceptRanges = conn.getHeaderField("Accept-Ranges") ?: "bytes"
+            val contentType = resp.header("Content-Type") ?: "video/mp4"
+            val contentLength = resp.header("Content-Length")
+            val contentRange = resp.header("Content-Range")
+            val acceptRanges = resp.header("Accept-Ranges") ?: "bytes"
 
             val headers = buildString {
                 append("$statusLine\r\n")
@@ -378,51 +513,32 @@ class LocalStreamProxy(private val context: Context) {
 
             if (method == "HEAD") return
 
-            val remoteIn: InputStream = conn.inputStream
+            val remoteIn = resp.body?.byteStream() ?: return
             val buffer = ByteArray(65536)
             var read: Int
             while (remoteIn.read(buffer).also { read = it } != -1) {
                 out.write(buffer, 0, read)
             }
             out.flush()
-        } finally {
-            conn.disconnect()
         }
     }
 
     private fun fetchText(url: String, referer: String, userAgent: String): String? {
-        val conn = openConnection(url, referer, userAgent, null)
         return try {
-            if (conn.responseCode in 200..299) {
-                conn.inputStream.bufferedReader().readText()
-            } else null
-        } catch (_: Exception) {
-            null
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    private fun openConnection(
-        targetUrl: String,
-        referer: String,
-        userAgent: String,
-        rangeHeader: String?
-    ): HttpURLConnection {
-        return (URL(targetUrl).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10000
-            readTimeout = 15000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", userAgent)
-            setRequestProperty("Referer", referer)
+            val reqBuilder = Request.Builder()
+                .url(url)
+                .header("User-Agent", userAgent)
+                .header("Referer", referer)
             try {
                 val refUri = URL(referer)
-                setRequestProperty("Origin", "${refUri.protocol}://${refUri.host}")
+                reqBuilder.header("Origin", "${refUri.protocol}://${refUri.host}")
             } catch (_: Exception) {
             }
-            if (rangeHeader != null) {
-                setRequestProperty("Range", rangeHeader)
+            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string() else null
             }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -460,12 +576,16 @@ class LocalStreamProxy(private val context: Context) {
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
             while (interfaces.hasMoreElements()) {
-                val intf = interfaces.nextElement()
-                val addrs = intf.inetAddresses
+                val nif = interfaces.nextElement()
+                if (nif.isLoopback || !nif.isUp) continue
+                val addrs = nif.inetAddresses
                 while (addrs.hasMoreElements()) {
                     val addr = addrs.nextElement()
                     if (!addr.isLoopbackAddress && addr is Inet4Address) {
-                        return addr.hostAddress
+                        val host = addr.hostAddress ?: continue
+                        if (host.startsWith("192.168.") || host.startsWith("10.") || host.startsWith("172.")) {
+                            return host
+                        }
                     }
                 }
             }

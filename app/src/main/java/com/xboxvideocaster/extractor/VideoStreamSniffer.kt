@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -63,16 +64,18 @@ class VideoStreamSniffer(private val context: Context) {
             "bongacams", "myfreecams", "cam4", "brazzers", "pornhub",
             "xvideos", "xnxx", "onlyfans", "aliexpr", "temu.com",
             "shein.com", "opera.com/download", "vpn", "clearclean",
-            "adrecover", "adsco.re", "realsrv", " twinrdsyn", "onmarshtompor",
+            "adrecover", "adsco.re", "realsrv", "twinrdsyn", "onmarshtompor",
             "alwingulla", "augresearch", "popunder", "poperblocker",
             "/assets/jquery/ev-cus", "deskademeta.php", "cdn.vidmoly.me/vj"
         )
 
         val ALLOWED_NAVIGATION_DOMAINS = listOf(
-            "anime-sama.", "fs26.lol", "french-stream.", "french-manga.",
+            "anime-sama.", "fs26.", "french-stream.", "fstream.", "french-manga.",
+            "fsvid.", "vidzy.", "trakx.", "vidara.", "multiup.", "darki",
             "ansembed.", "vidmoly.", "sendvid.", "sibnet.", "minochinos.",
             "morencius.", "embed4me.", "uqload.", "dood", "voe.", "luluvdo.",
             "vidoza.", "upstream.", "streamtape.", "filemoon.", "wish",
+            "smoothpre.", "movearnpre.", "vk.com", "vkvideo.ru", "myvi.", "yourupload.",
             "youtube.com", "youtu.be", "google.com"
         )
 
@@ -89,19 +92,84 @@ class VideoStreamSniffer(private val context: Context) {
 
         fun isVideoStreamUrl(url: String): Boolean {
             val lower = url.lowercase(Locale.ROOT)
-            if (lower.contains(".jpg") || lower.contains(".png") || lower.contains(".gif") ||
+            // Exclure impérativement la fausse vidéo "troll" de 18s de FrenchStream (/troll/master.m3u8) !
+            if (lower.contains("/troll/") ||
+                lower.contains(".jpg") || lower.contains(".png") || lower.contains(".gif") ||
                 lower.contains(".css") || lower.contains(".js") || lower.contains("favicon") ||
-                lower.contains("slides?")
+                lower.contains("slides?") || lower.contains(" iframes-") || lower.contains("/iframes-")
             ) {
                 return false
             }
             return VIDEO_PATTERNS.any { lower.contains(it) }
         }
+
+        /**
+         * Décode les flux vidéo obfusqués par XOR + Base64 inversé (utilisés par fsvid.lol et vidzy.cc sur French Stream).
+         * Comme l'URL décodée commence toujours par "https://", l'octet clé initial k0 vaut (reversed[0] xor 'h').
+         */
+        fun decodeXorBase64Stream(b64: String): String? {
+            return try {
+                val raw = Base64.decode(b64.trim(), Base64.DEFAULT)
+                if (raw.size < 20) return null
+                val reversed = raw.reversedArray()
+                val k0 = (reversed[0].toInt() and 0xFF) xor 'h'.code
+                val sb = StringBuilder(reversed.size)
+                for (i in reversed.indices) {
+                    val kk = (k0 + i * 89) and 0xFF
+                    val ch = ((reversed[i].toInt() and 0xFF) xor kk).toChar()
+                    sb.append(ch)
+                }
+                val decoded = sb.toString()
+                if ((decoded.startsWith("https://") || decoded.startsWith("http://")) &&
+                    isVideoStreamUrl(decoded)
+                ) {
+                    decoded
+                } else {
+                    null
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        /**
+         * Décompresse les scripts obfusqués avec eval(function(p,a,c,k,e,d){...}) (fsvid.lol, vidmoly, uqload...)
+         */
+        fun unpackDeanEdwardsIfNeeded(html: String): String {
+            val sb = StringBuilder(html)
+            try {
+                val regex = Pattern.compile(
+                    """eval\(function\(p,a,c,k,e,[dr]\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)\)""",
+                    Pattern.DOTALL
+                )
+                val matcher = regex.matcher(html)
+                while (matcher.find()) {
+                    var payload = matcher.group(1) ?: continue
+                    val radix = matcher.group(2)?.toIntOrNull() ?: 36
+                    val count = matcher.group(3)?.toIntOrNull() ?: 0
+                    val symtab = (matcher.group(4) ?: "").split("|")
+                    if (radix in 2..36 && count > 0 && symtab.isNotEmpty()) {
+                        val wordRegex = Regex("""\b[0-9a-zA-Z]+\b""")
+                        payload = wordRegex.replace(payload) { matchResult ->
+                            val token = matchResult.value
+                            val idx = token.toIntOrNull(radix)
+                            if (idx != null && idx in symtab.indices && symtab[idx].isNotEmpty()) {
+                                symtab[idx]
+                            } else {
+                                token
+                            }
+                        }
+                        sb.append("\n").append(payload)
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            return sb.toString()
+        }
     }
 
     /**
-     * Analyse intelligente directe via HTTP (Anime-Sama episodes.js -> Embed -> .m3u8/.mp4)
-     * Puis fallback WebView avec auto-trigger JWPlayer si nécessaire
+     * Analyse intelligente directe via HTTP
      */
     suspend fun extractFromUrlSmart(url: String): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         try {
@@ -110,32 +178,16 @@ class VideoStreamSniffer(private val context: Context) {
                 return@withContext Result.success(Pair(url, url))
             }
 
-            // 2. Est-ce une page de catalogue / saison Anime-Sama ?
-            if (url.contains("anime-sama", ignoreCase = true)) {
-                val baseDir = if (url.endsWith("/")) url else "${url.substringBeforeLast("/")}/"
-                val episodesJsUrl = "${baseDir}episodes.js"
-                val req = Request.Builder()
-                    .url(episodesJsUrl)
-                    .header("User-Agent", USER_AGENT)
-                    .header("Referer", url)
-                    .build()
-
-                httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val jsContent = resp.body?.string() ?: ""
-                        val embedUrls = parseEmbedUrlsFromEpisodesJs(jsContent)
-                        for (embedUrl in embedUrls) {
-                            val extracted = tryExtractDirectStreamFromEmbedHtml(embedUrl, url)
-                            if (extracted != null) {
-                                return@withContext Result.success(extracted)
-                            }
-                        }
-                    }
+            // 2. Est-ce une page de film/série French Stream (fs26.lol) ?
+            if (url.contains("fs26.") || url.contains("french-stream.")) {
+                val fsExtracted = tryExtractFromFrenchStreamPage(url)
+                if (fsExtracted != null) {
+                    return@withContext Result.success(fsExtracted)
                 }
             }
 
-            // 3. Est-ce directement une page de lecteur (ansembed, vidmoly, sendvid, minochinos, sibnet...) ?
-            val directFromEmbed = tryExtractDirectStreamFromEmbedHtml(url, "https://anime-sama.to/")
+            // 3. Est-ce directement une page de lecteur (fsvid, vidzy, ansembed, vidmoly, sendvid, sibnet...) ?
+            val directFromEmbed = tryExtractDirectStreamFromEmbedHtml(url, url)
             if (directFromEmbed != null) {
                 return@withContext Result.success(directFromEmbed)
             }
@@ -146,26 +198,66 @@ class VideoStreamSniffer(private val context: Context) {
         }
     }
 
-    private fun parseEmbedUrlsFromEpisodesJs(js: String): List<String> {
-        val result = mutableListOf<String>()
-        // Privilégier ansembed / vidmoly / sendvid / sibnet qui ont des liens directs clairs
-        val matcher = Pattern.compile("['\"](https?://[^'\"]+)['\"]").matcher(js)
-        val allUrls = mutableListOf<String>()
-        while (matcher.find()) {
-            val u = matcher.group(1) ?: continue
-            allUrls.add(u)
+    private fun tryExtractFromFrenchStreamPage(pageUrl: String): Pair<String, String>? {
+        return try {
+            val req = Request.Builder()
+                .url(pageUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", "https://fs26.lol/")
+                .build()
+
+            val html = httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string() ?: return null
+            }
+
+            // Chercher l'URL d'embed du lecteur actif dans la page French Stream (data-url-default ou player-frame)
+            val candidates = mutableListOf<String>()
+            val iframeMatcher = Pattern.compile("""id=["']player-frame["'][^>]*src=["'](https?://[^"']+)["']""", Pattern.CASE_INSENSITIVE).matcher(html)
+            if (iframeMatcher.find()) {
+                iframeMatcher.group(1)?.let { candidates.add(it) }
+            }
+            val dataUrlMatcher = Pattern.compile("""data-url-default=["'](https?://[^"']+)["']""", Pattern.CASE_INSENSITIVE).matcher(html)
+            while (dataUrlMatcher.find()) {
+                dataUrlMatcher.group(1)?.let { candidates.add(it) }
+            }
+
+            // Vérifier aussi film_api.php si newsid est présent
+            val idMatcher = Pattern.compile("""newsid=(\d+)|/(\d+)-""").matcher(pageUrl)
+            if (idMatcher.find()) {
+                val newsId = idMatcher.group(1) ?: idMatcher.group(2)
+                if (!newsId.isNullOrBlank()) {
+                    val apiReq = Request.Builder()
+                        .url("https://fs26.lol/engine/ajax/film_api.php?id=$newsId")
+                        .header("User-Agent", USER_AGENT)
+                        .header("Referer", pageUrl)
+                        .build()
+                    httpClient.newCall(apiReq).execute().use { apiResp ->
+                        if (apiResp.isSuccessful) {
+                            val json = apiResp.body?.string() ?: ""
+                            val embedMatcher = Pattern.compile("""https?:\\/\\/[^"']+""").matcher(json)
+                            while (embedMatcher.find()) {
+                                val u = embedMatcher.group(0)?.replace("\\/", "/") ?: continue
+                                candidates.add(u)
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (embedUrl in candidates.distinct()) {
+                val stream = tryExtractDirectStreamFromEmbedHtml(embedUrl, pageUrl)
+                if (stream != null) return stream
+            }
+            null
+        } catch (_: Exception) {
+            null
         }
-        // Trier pour tester ansembed / vidmoly / sendvid en priorité (Episode 1 de chaque lecteur)
-        val preferred = allUrls.filter {
-            it.contains("ansembed") || it.contains("vidmoly") || it.contains("sendvid") || it.contains("sibnet")
-        }
-        result.addAll(preferred.take(4))
-        result.addAll(allUrls.take(4))
-        return result.distinct()
     }
 
     /**
-     * Télécharge le HTML d'un lecteur embed et extrait le lien .m3u8 ou .mp4 (ex: sources: [{ file: '...' }])
+     * Télécharge le HTML d'un lecteur embed et extrait le vrai lien .m3u8 ou .mp4
+     * (décode aussi le chiffrement XOR+Base64 de fsvid.lol / vidzy.cc et ignore le faux flux /troll/).
      */
     fun tryExtractDirectStreamFromEmbedHtml(embedUrl: String, referer: String): Pair<String, String>? {
         return try {
@@ -177,22 +269,50 @@ class VideoStreamSniffer(private val context: Context) {
 
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return null
-                val html = resp.body?.string() ?: return null
+                val rawHtml = resp.body?.string() ?: return null
+                val fullText = unpackDeanEdwardsIfNeeded(rawHtml)
 
-                // Chercher une URL .m3u8 ou .mp4 explicite dans le code source
+                // 1. Décodage prioritaire du flux chiffré XOR + Base64 (fsvid.lol / vidzy.cc sur French Stream)
+                val xorB64Pattern = Pattern.compile("""\}\)\(["']([A-Za-z0-9+/=]{40,})["']\)""")
+                val xorMatcher = xorB64Pattern.matcher(fullText)
+                while (xorMatcher.find()) {
+                    val b64 = xorMatcher.group(1) ?: continue
+                    val decoded = decodeXorBase64Stream(b64)
+                    if (!decoded.isNullOrBlank() && isVideoStreamUrl(decoded)) {
+                        return Pair(decoded, embedUrl)
+                    }
+                }
+
+                // 2. Chercher toutes les URLs .m3u8 explicites (en filtrant /troll/ et iframes-)
                 val m3u8Pattern = Pattern.compile("""['"](https?://[^'"]+\.m3u8[^'"]*)['"]""", Pattern.CASE_INSENSITIVE)
-                val m3u8Matcher = m3u8Pattern.matcher(html)
-                if (m3u8Matcher.find()) {
-                    val found = m3u8Matcher.group(1)
-                    if (!found.isNullOrBlank()) return Pair(found, embedUrl)
+                val m3u8Matcher = m3u8Pattern.matcher(fullText)
+                while (m3u8Matcher.find()) {
+                    val found = m3u8Matcher.group(1)?.replace("\\/", "/")
+                    if (!found.isNullOrBlank() && isVideoStreamUrl(found)) {
+                        return Pair(found, embedUrl)
+                    }
                 }
 
+                // 3. Chercher toutes les URLs .mp4 explicites
                 val mp4Pattern = Pattern.compile("""['"](https?://[^'"]+\.mp4[^'"]*)['"]""", Pattern.CASE_INSENSITIVE)
-                val mp4Matcher = mp4Pattern.matcher(html)
-                if (mp4Matcher.find()) {
-                    val found = mp4Matcher.group(1)
-                    if (!found.isNullOrBlank()) return Pair(found, embedUrl)
+                val mp4Matcher = mp4Pattern.matcher(fullText)
+                while (mp4Matcher.find()) {
+                    val found = mp4Matcher.group(1)?.replace("\\/", "/")
+                    if (!found.isNullOrBlank() && isVideoStreamUrl(found)) {
+                        return Pair(found, embedUrl)
+                    }
                 }
+
+                // 4. Cas spécifique Sibnet (chemin relatif /v/xxxxx.mp4)
+                val sibnetPattern = Pattern.compile("""src\s*:\s*['"](/v/[^'"]+\.mp4[^'"]*)['"]""", Pattern.CASE_INSENSITIVE)
+                val sibnetMatcher = sibnetPattern.matcher(fullText)
+                if (sibnetMatcher.find()) {
+                    val rel = sibnetMatcher.group(1)
+                    if (!rel.isNullOrBlank()) {
+                        return Pair("https://video.sibnet.ru$rel", "https://video.sibnet.ru/")
+                    }
+                }
+
                 null
             }
         } catch (_: Exception) {
@@ -216,7 +336,7 @@ class VideoStreamSniffer(private val context: Context) {
                 addJavascriptInterface(object {
                     @JavascriptInterface
                     fun onUrlFound(streamUrl: String, ref: String) {
-                        if (!hasDetectedStream && streamUrl.startsWith("http")) {
+                        if (!hasDetectedStream && streamUrl.startsWith("http") && isVideoStreamUrl(streamUrl)) {
                             hasDetectedStream = true
                             mainHandler.post {
                                 callback.onStreamFound(streamUrl, ref.ifBlank { pageUrl })
@@ -251,17 +371,14 @@ class VideoStreamSniffer(private val context: Context) {
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
-                        // Script qui inspecte JWPlayer, les balises <video> et les iframes d'Anime-Sama
                         val jsInspect = """
                             (function() {
                                 try {
-                                    // 1. Si on est sur Anime-Sama et qu'il y a un iframe #playerDF, aller dedans
-                                    var iframe = document.getElementById('playerDF') || document.querySelector('iframe[src*="embed"], iframe[src*="vidmoly"], iframe[src*="ansembed"], iframe[src*="sendvid"]');
-                                    if (iframe && iframe.src && iframe.src.startsWith('http') && window.location.href.indexOf('anime-sama') !== -1) {
+                                    var iframe = document.getElementById('playerDF') || document.getElementById('player-frame') || document.querySelector('iframe[src*="embed"], iframe[src*="vidmoly"], iframe[src*="ansembed"], iframe[src*="sendvid"], iframe[src*="fsvid"], iframe[src*="vidzy"]');
+                                    if (iframe && iframe.src && iframe.src.startsWith('http') && (window.location.href.indexOf('anime-sama') !== -1 || window.location.href.indexOf('fs26') !== -1)) {
                                         window.location.href = iframe.src;
                                         return;
                                     }
-                                    // 2. Si jwplayer est présent sur la page
                                     if (typeof jwplayer === 'function') {
                                         var p = jwplayer();
                                         if (p && typeof p.getPlaylistItem === 'function') {
@@ -275,11 +392,20 @@ class VideoStreamSniffer(private val context: Context) {
                                             p.play();
                                         }
                                     }
-                                    // 3. Balises <video>
+                                    if (typeof videojs === 'function') {
+                                        var vp = videojs.getPlayers && Object.values(videojs.getPlayers())[0];
+                                        if (vp && typeof vp.currentSrc === 'function') {
+                                            var vsrc = vp.currentSrc();
+                                            if (vsrc && vsrc.startsWith('http') && vsrc.indexOf('/troll/') === -1) {
+                                                AndroidSniffer.onUrlFound(vsrc, window.location.href);
+                                                return;
+                                            }
+                                        }
+                                    }
                                     var vids = document.querySelectorAll('video, source');
                                     for (var i = 0; i < vids.length; i++) {
                                         var s = vids[i].src || vids[i].currentSrc;
-                                        if (s && s.startsWith('http')) {
+                                        if (s && s.startsWith('http') && s.indexOf('/troll/') === -1) {
                                             AndroidSniffer.onUrlFound(s, window.location.href);
                                             return;
                                         }
@@ -295,7 +421,7 @@ class VideoStreamSniffer(private val context: Context) {
 
                 mainHandler.postDelayed({
                     if (!hasDetectedStream) {
-                        callback.onError("Aucun flux vidéo détecté. Utilisez l'onglet Navigateur intégré pour choisir votre épisode !")
+                        callback.onError("Aucun flux vidéo détecté. Appuyez une fois sur Play ▶ dans la page puis recliquez sur LANCER !")
                         cleanup()
                     }
                 }, 15000)
