@@ -185,6 +185,8 @@ class LocalStreamProxy(private val context: Context) {
         if (isHls) {
             segments = parseHlsSegments(realStreamUrl, ref, ua)
             totalDuration = segments.sumOf { it.durationSec }.toInt()
+        }
+
         var isPlayable = true
         if (isHls && segments.isEmpty()) {
             isPlayable = false
