@@ -25,18 +25,24 @@ class DlnaController(
     data class DiscoveredDevice(
         val name: String,
         val ip: String,
-        val controlUrl: String
+        val controlUrl: String,
+        val renderingControlUrl: String = ""
     )
 
     companion object {
         private const val DEFAULT_XBOX_PORT = 2869
         private const val DEFAULT_XBOX_CONTROL_PATH =
             "/upnphost/udhisapi.dll?control=uuid:263ceedd-cc6e-416f-b916-1f43eada8031+urn:upnp-org:serviceId:AVTransport"
+        private const val DEFAULT_XBOX_RENDERING_PATH =
+            "/upnphost/udhisapi.dll?control=uuid:263ceedd-cc6e-416f-b916-1f43eada8031+urn:upnp-org:serviceId:RenderingControl"
         private const val SOAP_MEDIA_TYPE = "text/xml; charset=\"utf-8\""
     }
 
     @Volatile
     private var cachedControlUrl: String? = null
+
+    @Volatile
+    private var cachedRenderingControlUrl: String? = null
 
     fun setPreferredControlUrl(controlUrl: String?) {
         cachedControlUrl = controlUrl
@@ -148,17 +154,35 @@ class DlnaController(
                 val avIndex = xml.indexOf("urn:schemas-upnp-org:service:AVTransport:1")
                 if (avIndex == -1) return null
 
+                val base = URL(locationUrl)
+                fun buildFullUrl(path: String): String {
+                    return if (path.startsWith("http")) {
+                        path
+                    } else if (path.startsWith("/")) {
+                        "${base.protocol}://${base.host}:${base.port}$path"
+                    } else {
+                        "${base.protocol}://${base.host}:${base.port}/$path"
+                    }
+                }
+
                 val sub = xml.substring(avIndex)
                 val ctrlMatcher = Pattern.compile("<controlURL>([^<]+)</controlURL>").matcher(sub)
                 if (!ctrlMatcher.find()) return null
                 val ctrlPath = ctrlMatcher.group(1)?.trim() ?: return null
-                val base = URL(locationUrl)
-                val fullCtrlUrl = if (ctrlPath.startsWith("http")) {
-                    ctrlPath
-                } else if (ctrlPath.startsWith("/")) {
-                    "${base.protocol}://${base.host}:${base.port}$ctrlPath"
-                } else {
-                    "${base.protocol}://${base.host}:${base.port}/${ctrlPath}"
+                val fullCtrlUrl = buildFullUrl(ctrlPath)
+
+                // Extraire aussi l'URL RenderingControl (pour régler le volume et le Mute de la TV / Xbox)
+                var fullRenderingUrl = ""
+                val rcIndex = xml.indexOf("urn:schemas-upnp-org:service:RenderingControl:1")
+                if (rcIndex != -1) {
+                    val rcSub = xml.substring(rcIndex)
+                    val rcMatcher = Pattern.compile("<controlURL>([^<]+)</controlURL>").matcher(rcSub)
+                    if (rcMatcher.find()) {
+                        val rcPath = rcMatcher.group(1)?.trim() ?: ""
+                        if (rcPath.isNotBlank()) {
+                            fullRenderingUrl = buildFullUrl(rcPath)
+                        }
+                    }
                 }
 
                 val nameMatcher = Pattern.compile("<friendlyName>([^<]+)</friendlyName>").matcher(xml)
@@ -168,7 +192,8 @@ class DlnaController(
                 DiscoveredDevice(
                     name = displayName,
                     ip = ip,
-                    controlUrl = fullCtrlUrl
+                    controlUrl = fullCtrlUrl,
+                    renderingControlUrl = fullRenderingUrl
                 )
             }
         } catch (_: Exception) {
@@ -184,15 +209,50 @@ class DlnaController(
 
         val discoveredLocation = discoverAvTransportLocationViaSsdp(ip)
         if (discoveredLocation != null) {
-            val parsedControlUrl = fetchControlUrlFromDescriptionXml(discoveredLocation)
-            if (parsedControlUrl != null) {
-                cachedControlUrl = parsedControlUrl
-                return@withContext parsedControlUrl
+            val parsedDevice = parseDeviceFromDescriptionXml(ip, discoveredLocation)
+            if (parsedDevice != null) {
+                cachedControlUrl = parsedDevice.controlUrl
+                if (parsedDevice.renderingControlUrl.isNotBlank()) {
+                    cachedRenderingControlUrl = parsedDevice.renderingControlUrl
+                }
+                return@withContext parsedDevice.controlUrl
             }
         }
 
         val fallback = "http://$ip:$DEFAULT_XBOX_PORT$DEFAULT_XBOX_CONTROL_PATH"
         cachedControlUrl = fallback
+        fallback
+    }
+
+    suspend fun resolveRenderingControlUrl(ip: String): String = withContext(Dispatchers.IO) {
+        val currentRc = cachedRenderingControlUrl
+        if (!currentRc.isNullOrBlank() && currentRc.contains(ip)) {
+            return@withContext currentRc
+        }
+
+        val discoveredLocation = discoverAvTransportLocationViaSsdp(ip)
+        if (discoveredLocation != null) {
+            val parsedDevice = parseDeviceFromDescriptionXml(ip, discoveredLocation)
+            if (parsedDevice != null && parsedDevice.renderingControlUrl.isNotBlank()) {
+                cachedRenderingControlUrl = parsedDevice.renderingControlUrl
+                return@withContext parsedDevice.renderingControlUrl
+            }
+        }
+
+        // Si l'URL AVTransport est déjà connue (ex: Samsung / LG / Sony), déduire l'URL RenderingControl
+        val currentAv = cachedControlUrl
+        if (!currentAv.isNullOrBlank() && currentAv.contains(ip)) {
+            val guessed = currentAv
+                .replace("AVTransport", "RenderingControl")
+                .replace("avtransport", "renderingcontrol")
+            if (guessed != currentAv) {
+                cachedRenderingControlUrl = guessed
+                return@withContext guessed
+            }
+        }
+
+        val fallback = "http://$ip:$DEFAULT_XBOX_PORT$DEFAULT_XBOX_RENDERING_PATH"
+        cachedRenderingControlUrl = fallback
         fallback
     }
 
@@ -392,6 +452,116 @@ class DlnaController(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * Récupère le volume actuel de la TV / Xbox (0 à 100) via UPnP RenderingControl:1
+     */
+    suspend fun getVolume(ip: String): Int? = withContext(Dispatchers.IO) {
+        try {
+            val rcUrl = resolveRenderingControlUrl(ip)
+            val envelope = """<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:GetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+            <InstanceID>0</InstanceID>
+            <Channel>Master</Channel>
+        </u:GetVolume>
+    </s:Body>
+</s:Envelope>""".trimIndent()
+
+            val request = Request.Builder()
+                .url(rcUrl)
+                .addHeader("Content-Type", SOAP_MEDIA_TYPE)
+                .addHeader("SOAPACTION", "\"urn:schemas-upnp-org:service:RenderingControl:1#GetVolume\"")
+                .post(envelope.toRequestBody(SOAP_MEDIA_TYPE.toMediaType()))
+                .build()
+
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val xml = resp.body?.string() ?: return@withContext null
+                val m = Pattern.compile("<CurrentVolume[^>]*>\\s*(\\d+)\\s*</CurrentVolume>").matcher(xml)
+                if (m.find()) {
+                    return@withContext m.group(1)?.toIntOrNull()?.coerceIn(0, 100)
+                }
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Définit le volume de la TV / Xbox (0 à 100) via UPnP RenderingControl:1
+     */
+    suspend fun setVolume(ip: String, volume: Int): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            val safeVol = volume.coerceIn(0, 100)
+            val rcUrl = resolveRenderingControlUrl(ip)
+            val body = """
+                <InstanceID>0</InstanceID>
+                <Channel>Master</Channel>
+                <DesiredVolume>$safeVol</DesiredVolume>
+            """.trimIndent()
+            val res = sendRenderingSoapAction(rcUrl, "SetVolume", body)
+            if (res.isSuccess) Result.success(safeVol) else Result.failure(res.exceptionOrNull() ?: Exception("Erreur SetVolume"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Monte ou baisse le volume de la TV / Xbox (ex: +5 ou -5)
+     */
+    suspend fun adjustVolume(ip: String, delta: Int, fallbackCurrent: Int = 25): Result<Int> = withContext(Dispatchers.IO) {
+        val current = getVolume(ip) ?: fallbackCurrent
+        val next = (current + delta).coerceIn(0, 100)
+        setVolume(ip, next)
+    }
+
+    /**
+     * Active ou désactive le mode Muet (Mute) sur la TV / Xbox
+     */
+    suspend fun setMute(ip: String, mute: Boolean): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val rcUrl = resolveRenderingControlUrl(ip)
+            val muteVal = if (mute) 1 else 0
+            val body = """
+                <InstanceID>0</InstanceID>
+                <Channel>Master</Channel>
+                <DesiredMute>$muteVal</DesiredMute>
+            """.trimIndent()
+            val res = sendRenderingSoapAction(rcUrl, "SetMute", body)
+            if (res.isSuccess) Result.success(mute) else Result.failure(res.exceptionOrNull() ?: Exception("Erreur SetMute"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun sendRenderingSoapAction(rcUrl: String, actionName: String, bodyInnerXml: String): Result<Unit> {
+        val envelope = """<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:$actionName xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+            $bodyInnerXml
+        </u:$actionName>
+    </s:Body>
+</s:Envelope>""".trimIndent()
+
+        val request = Request.Builder()
+            .url(rcUrl)
+            .addHeader("Content-Type", SOAP_MEDIA_TYPE)
+            .addHeader("SOAPACTION", "\"urn:schemas-upnp-org:service:RenderingControl:1#$actionName\"")
+            .post(envelope.toRequestBody(SOAP_MEDIA_TYPE.toMediaType()))
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                val errBody = response.body?.string() ?: ""
+                return Result.failure(Exception("HTTP ${response.code} sur $actionName: $errBody"))
+            }
+        }
+        return Result.success(Unit)
     }
 
     private fun sendSoapAction(controlUrl: String, actionName: String, bodyInnerXml: String): Result<Unit> {

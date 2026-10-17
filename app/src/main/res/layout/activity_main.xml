@@ -84,7 +84,7 @@
                 android:textSize="11sp" />
         </LinearLayout>
 
-        <!-- Row 2: Quick Site Shortcuts + URL Bar -->
+        <!-- Row 2: Quick Site Shortcuts + Favoris + URL Bar -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -102,7 +102,7 @@
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:minWidth="0dp"
-                android:paddingHorizontal="8dp"
+                android:paddingHorizontal="7dp"
                 android:text="⚡ Anime"
                 android:textColor="#38BDF8"
                 android:textSize="11sp"
@@ -113,15 +113,32 @@
                 style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
-                android:layout_marginEnd="6dp"
+                android:layout_marginEnd="4dp"
                 android:backgroundTint="#2E1A0F"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
                 android:minWidth="0dp"
-                android:paddingHorizontal="8dp"
+                android:paddingHorizontal="7dp"
                 android:text="🎬 FS26"
                 android:textColor="#FB923C"
                 android:textSize="11sp"
+                app:cornerRadius="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnFavorites"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="6dp"
+                android:backgroundTint="#312E18"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
+                android:text="⭐"
+                android:textColor="#FACC15"
+                android:textSize="12sp"
+                android:textStyle="bold"
                 app:cornerRadius="8dp" />
 
             <EditText
@@ -142,9 +159,9 @@
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnGoUrl"
-                android:layout_width="46dp"
+                android:layout_width="44dp"
                 android:layout_height="36dp"
-                android:layout_marginStart="6dp"
+                android:layout_marginStart="5dp"
                 android:backgroundTint="@color/xbox_green"
                 android:insetTop="0dp"
                 android:insetBottom="0dp"
@@ -190,7 +207,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:layout_marginBottom="20dp"
+            android:layout_marginBottom="16dp"
             android:gravity="center"
             android:text="Navigation sans publicité &amp; diffusion directe sur votre TV ou Xbox"
             android:textColor="@color/text_secondary"
@@ -201,7 +218,7 @@
             android:id="@+id/cardSelectAnimeSama"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="14dp"
+            android:layout_marginBottom="12dp"
             android:clickable="true"
             android:focusable="true"
             app:cardBackgroundColor="#132032"
@@ -214,14 +231,14 @@
                 android:layout_height="wrap_content"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:padding="18dp">
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="16dp"
                     android:text="⚡"
-                    android:textSize="32sp" />
+                    android:textSize="30sp" />
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -234,7 +251,7 @@
                         android:layout_height="wrap_content"
                         android:text="Anime-Sama"
                         android:textColor="#38BDF8"
-                        android:textSize="20sp"
+                        android:textSize="19sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -253,7 +270,7 @@
             android:id="@+id/cardSelectFrenchStream"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="14dp"
+            android:layout_marginBottom="12dp"
             android:clickable="true"
             android:focusable="true"
             app:cardBackgroundColor="#27170E"
@@ -266,14 +283,14 @@
                 android:layout_height="wrap_content"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:padding="18dp">
+                android:padding="16dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="16dp"
                     android:text="🎬"
-                    android:textSize="32sp" />
+                    android:textSize="30sp" />
 
                 <LinearLayout
                     android:layout_width="0dp"
@@ -286,7 +303,7 @@
                         android:layout_height="wrap_content"
                         android:text="French Stream (FS26)"
                         android:textColor="#FB923C"
-                        android:textSize="20sp"
+                        android:textSize="19sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -300,12 +317,26 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- Bouton Favoris / Séries en cours -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnHomeFavorites"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginBottom="8dp"
+            android:backgroundTint="#312E18"
+            android:text="⭐ Mes Favoris &amp; Séries en cours"
+            android:textColor="#FACC15"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            app:cornerRadius="12dp" />
+
         <!-- Bouton Scanner les appareils sur le Wi-Fi -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnHomeScanDevices"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="match_parent"
-            android:layout_height="48dp"
+            android:layout_height="46dp"
             android:backgroundTint="#1E3A8A"
             android:text="📡 Scanner les TV / Xbox sur mon Wi-Fi"
             android:textColor="#93C5FD"
@@ -313,18 +344,21 @@
             android:textStyle="bold"
             app:cornerRadius="12dp" />
 
-        <!-- Big Button 3: Reprendre la dernière page -->
+        <!-- Big Button 3: Reprendre où j'en étais -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnResumeLastPage"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
-            android:layout_height="48dp"
+            android:layout_height="46dp"
             android:layout_marginTop="8dp"
-            android:text="⏳ Reprendre ma dernière page visitée"
-            android:textColor="@color/white"
-            android:textSize="13sp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="⏳ Reprendre où j'en étais"
+            android:textColor="#4ADE80"
+            android:textSize="12sp"
+            android:textStyle="bold"
             app:cornerRadius="12dp"
-            app:strokeColor="#3F444E" />
+            app:strokeColor="#14532D" />
 
     </LinearLayout>
 
@@ -379,7 +413,7 @@
                 android:visibility="gone" />
         </LinearLayout>
 
-        <!-- Télécommande TV / Xbox avec Curseur (SeekBar) + Boutons (-30s / Pause / +30s / Stop) -->
+        <!-- Télécommande TV / Xbox avec Curseur (SeekBar) + Boutons (-30s / Pause / +30s / Stop) + Volume & Skip Intro -->
         <LinearLayout
             android:id="@+id/layoutRemoteControls"
             android:layout_width="match_parent"
@@ -427,7 +461,7 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
-            <!-- Boutons -30s / Pause / +30s / Stop -->
+            <!-- Ligne 1 Télécommande : -30s / Pause / +30s / Stop -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -438,7 +472,7 @@
                     android:id="@+id/btnRewind30"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="0dp"
-                    android:layout_height="42dp"
+                    android:layout_height="40dp"
                     android:layout_marginEnd="6dp"
                     android:layout_weight="1"
                     android:backgroundTint="#2B303B"
@@ -455,7 +489,7 @@
                     android:id="@+id/btnPlayPause"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="0dp"
-                    android:layout_height="42dp"
+                    android:layout_height="40dp"
                     android:layout_marginEnd="6dp"
                     android:layout_weight="1.2"
                     android:backgroundTint="#1E293B"
@@ -472,7 +506,7 @@
                     android:id="@+id/btnForward30"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="0dp"
-                    android:layout_height="42dp"
+                    android:layout_height="40dp"
                     android:layout_marginEnd="6dp"
                     android:layout_weight="1"
                     android:backgroundTint="#2B303B"
@@ -489,17 +523,93 @@
                     android:id="@+id/btnStop"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="42dp"
+                    android:layout_height="40dp"
                     android:backgroundTint="#3B1818"
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
-                    android:minWidth="52dp"
+                    android:minWidth="50dp"
                     android:paddingHorizontal="10dp"
                     android:text="⏹"
                     android:textColor="@color/accent_red"
                     android:textSize="14sp"
                     android:textStyle="bold"
                     app:cornerRadius="10dp" />
+            </LinearLayout>
+
+            <!-- Ligne 2 Télécommande : Volume TV (Vol - / Mute / Vol +) + Skip Intro Précis (AniSkip) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="5dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnVolDown"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="5dp"
+                    android:layout_weight="0.8"
+                    android:backgroundTint="#22262F"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
+                    android:text="🔉 Vol -"
+                    android:textColor="#CBD5E1"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="8dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnVolMute"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="5dp"
+                    android:layout_weight="0.75"
+                    android:backgroundTint="#22262F"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
+                    android:text="🔇 Muet"
+                    android:textColor="#CBD5E1"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="8dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnVolUp"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="0.8"
+                    android:backgroundTint="#22262F"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:padding="0dp"
+                    android:text="🔊 Vol +"
+                    android:textColor="#CBD5E1"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="8dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnSkipIntro"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1.35"
+                    android:backgroundTint="#2E1065"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingHorizontal="6dp"
+                    android:text="⏭ Skip Intro"
+                    android:textColor="#DDD6FE"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="8dp" />
             </LinearLayout>
         </LinearLayout>
 

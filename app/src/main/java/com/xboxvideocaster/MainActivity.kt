@@ -37,6 +37,7 @@ import com.xboxvideocaster.databinding.ActivityMainBinding
 import com.xboxvideocaster.dlna.CastForegroundService
 import com.xboxvideocaster.dlna.DlnaController
 import com.xboxvideocaster.dlna.LocalStreamProxy
+import com.xboxvideocaster.extractor.AniSkipClient
 import com.xboxvideocaster.extractor.VideoStreamSniffer
 import com.xboxvideocaster.extractor.YouTubeExtractor
 import com.xboxvideocaster.updater.AppUpdater
@@ -46,15 +47,25 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionListener {
+
+    data class FavoriteItem(
+        val title: String,
+        val url: String,
+        val episodeIndex: Int = -1,
+        val episodeLabel: String = ""
+    )
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: SharedPreferences
 
     private val dlnaController = DlnaController()
     private val youtubeExtractor = YouTubeExtractor()
+    private val aniSkipClient = AniSkipClient()
     private lateinit var videoStreamSniffer: VideoStreamSniffer
     private lateinit var localStreamProxy: LocalStreamProxy
     private lateinit var appUpdater: AppUpdater
@@ -67,6 +78,29 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var currentIframeEmbedUrl: String? = null
+
+    // Métadonnées de la page en cours (pour Favoris, Reprise & AniSkip)
+    @Volatile
+    private var currentPageTitle: String = ""
+
+    @Volatile
+    private var currentEpisodeNumber: Int = 1
+
+    @Volatile
+    private var currentEpisodeIndex: Int = -1
+
+    @Volatile
+    private var currentEpisodeLabel: String = ""
+
+    @Volatile
+    private var pendingRestoreEpisodeIdx: Int = -1
+
+    @Volatile
+    private var currentIntroWindow: AniSkipClient.IntroWindow? = null
+
+    // État du Volume TV / Xbox
+    private var lastKnownTvVolume: Int = 25
+    private var isTvMuted: Boolean = false
 
     // État de la lecture en cours sur la Xbox / TV
     private var activePreparedStream: LocalStreamProxy.PreparedStream? = null
@@ -92,6 +126,11 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_DEVICE_CTRL_URL = "key_device_ctrl_url"
         private const val KEY_AUTO_NEXT = "key_auto_next"
         private const val KEY_LAST_PAGE = "key_last_page"
+        private const val KEY_LAST_CAST_PAGE_URL = "key_last_cast_page_url"
+        private const val KEY_LAST_CAST_TITLE = "key_last_cast_title"
+        private const val KEY_LAST_CAST_EP_IDX = "key_last_cast_ep_idx"
+        private const val KEY_LAST_CAST_POS_SEC = "key_last_cast_pos_sec"
+        private const val KEY_FAVORITES_JSON = "key_favorites_json"
         private const val DEFAULT_XBOX_IP = "192.168.1.52"
         private const val ANIME_SAMA_HOME = "https://anime-sama.to/"
         private const val FRENCH_STREAM_HOME = "https://fs26.lol/"
@@ -106,6 +145,7 @@ class MainActivity : AppCompatActivity() {
         videoStreamSniffer = VideoStreamSniffer(this)
         localStreamProxy = LocalStreamProxy.getInstance(this)
         appUpdater = AppUpdater(this)
+        CastForegroundService.remoteActionListener = this
 
         requestNotificationPermissionIfNeeded()
         setupIpAndPreferences()
@@ -117,6 +157,39 @@ class MainActivity : AppCompatActivity() {
 
         if (!handleIncomingIntent(intent)) {
             showHomeHub()
+        }
+    }
+
+    override fun onNotificationPlayPauseToggled(isPaused: Boolean) {
+        runOnUiThread {
+            isXboxPaused = isPaused
+            binding.btnPlayPause.text = if (isPaused) "▶ PLAY" else "⏸ PAUSE"
+            updateStatus(
+                if (isPaused) "En pause sur la TV / Xbox ⏸" else "Lecture en cours sur la TV / Xbox 🎮",
+                isLoading = false
+            )
+        }
+    }
+
+    override fun onNotificationSeekCompleted(newPositionSec: Int) {
+        runOnUiThread {
+            currentPlaybackSec = newPositionSec
+            isXboxPaused = false
+            binding.btnPlayPause.text = "⏸ PAUSE"
+            updateTimerDisplay()
+            updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
+        }
+    }
+
+    override fun onNotificationStopped() {
+        runOnUiThread {
+            stopPositionTracker()
+            activePreparedStream = null
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            restoreBlankedWebViewIframe()
+            binding.layoutRemoteControls.visibility = View.GONE
+            binding.tvTimer.visibility = View.GONE
+            updateStatus("Lecture arrêtée depuis la notification", isLoading = false)
         }
     }
 
@@ -150,9 +223,12 @@ class MainActivity : AppCompatActivity() {
         val existingStream = localStreamProxy.activeStream
         if (existingStream != null && CastForegroundService.isCastActive) {
             activePreparedStream = existingStream
-            window.addFlags( android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            currentPlaybackSec = CastForegroundService.currentPositionSec
+            isXboxPaused = CastForegroundService.isPausedState
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             binding.layoutRemoteControls.visibility = View.VISIBLE
             binding.tvTimer.visibility = View.VISIBLE
+            binding.btnPlayPause.text = if (isXboxPaused) "▶ PLAY" else "⏸ PAUSE"
             updateStatus("Diffusion active en cours sur la TV / Xbox 🎮", isLoading = false)
             binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
             startPositionTracker()
@@ -170,10 +246,24 @@ class MainActivity : AppCompatActivity() {
             exitPhoneFullscreen()
         }
         binding.layoutHomeHub.visibility = View.VISIBLE
+        val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
+        val savedCastTitle = prefs.getString(KEY_LAST_CAST_TITLE, null)
+        val savedCastSec = prefs.getInt(KEY_LAST_CAST_POS_SEC, 0)
         val savedPage = prefs.getString(KEY_LAST_PAGE, null)
-        binding.btnResumeLastPage.visibility = if (savedPage.isNullOrBlank()) View.GONE else View.VISIBLE
+
+        if (!savedCastPage.isNullOrBlank() && savedCastSec > 15 && !savedCastTitle.isNullOrBlank()) {
+            binding.btnResumeLastPage.visibility = View.VISIBLE
+            val timeStr = dlnaController.formatSecondsToHms(savedCastSec)
+            binding.btnResumeLastPage.text = "⏳ Reprendre : $savedCastTitle ($timeStr)"
+        } else if (!savedPage.isNullOrBlank()) {
+            binding.btnResumeLastPage.visibility = View.VISIBLE
+            binding.btnResumeLastPage.text = "⏳ Reprendre ma dernière page visitée"
+        } else {
+            binding.btnResumeLastPage.visibility = View.GONE
+        }
+
         if (activePreparedStream == null) {
-            updateStatus("Choisissez une plateforme ou scannez votre TV / Xbox", isLoading = false)
+            updateStatus("Choisissez une plateforme, un favori ou scannez votre TV / Xbox", isLoading = false)
         }
     }
 
@@ -289,6 +379,23 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 @JavascriptInterface
+                fun onPageMetadataDetected(pageTitle: String, epNum: Int, epIdx: Int, epLabel: String, pageUrl: String) {
+                    val cleanTitle = pageTitle
+                        .replace(Regex("(?i)\\s*[-|•]\\s*(anime-sama|french-stream|fs26).*"), "")
+                        .trim()
+                    val changedEp = (epNum != currentEpisodeNumber || epIdx != currentEpisodeIndex || cleanTitle != currentPageTitle)
+                    currentPageTitle = cleanTitle
+                    if (epNum > 0) currentEpisodeNumber = epNum
+                    currentEpisodeIndex = epIdx
+                    currentEpisodeLabel = epLabel
+
+                    if (changedEp && epIdx >= 0) {
+                        updateFavoriteEpisodeIfPresent(pageUrl, epIdx, epLabel)
+                        refreshAniSkipIntroForCurrentEpisode(pageUrl, cleanTitle, currentEpisodeNumber)
+                    }
+                }
+
+                @JavascriptInterface
                 fun onAutoNextEpisodeReady(nextEmbedOrPageUrl: String, pageReferer: String) {
                     val ip = binding.etXboxIp.text?.toString()?.trim() ?: DEFAULT_XBOX_IP
                     runOnUiThread {
@@ -302,7 +409,7 @@ class MainActivity : AppCompatActivity() {
                         if (extracted != null && VideoStreamSniffer.isVideoStreamUrl(extracted.first)) {
                             lastDetectedStreamUrl = extracted.first
                             lastDetectedReferer = extracted.second
-                            sendStreamToXbox(extracted.first, extracted.second, ip)
+                            sendStreamToXbox(extracted.first, extracted.second, ip, forceStartFromZero = true)
                         } else {
                             withContext(Dispatchers.Main) {
                                 startExtractionAndCast(nextEmbedOrPageUrl, ip)
@@ -398,10 +505,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun refreshAniSkipIntroForCurrentEpisode(pageUrl: String, pageTitle: String, episodeNum: Int) {
+        currentIntroWindow = null
+        runOnUiThread {
+            binding.btnSkipIntro.text = "⏭ Skip Intro"
+        }
+        if (!pageUrl.contains("anime-sama", ignoreCase = true) && episodeNum <= 0) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val query = aniSkipClient.extractAnimeQueryAndSeason(pageUrl, pageTitle)
+            val totalDur = activePreparedStream?.totalDurationSec ?: 0
+            val intro = aniSkipClient.fetchExactIntroTimestamps(query, episodeNum, totalDur)
+            currentIntroWindow = intro
+            withContext(Dispatchers.Main) {
+                if (intro != null) {
+                    val endFmt = formatShortMinSec(intro.endSec)
+                    binding.btnSkipIntro.text = "⏭ Intro (→ $endFmt)"
+                } else {
+                    binding.btnSkipIntro.text = "⏭ Intro (+1m25)"
+                }
+            }
+        }
+    }
+
+    private fun formatShortMinSec(sec: Int): String {
+        val m = (sec.coerceAtLeast(0)) / 60
+        val s = (sec.coerceAtLeast(0)) % 60
+        return String.format(java.util.Locale.US, "%d:%02d", m, s)
+    }
+
     private fun injectSmartSiteWatcher() {
+        val restoreEpIdx = pendingRestoreEpisodeIdx
+        pendingRestoreEpisodeIdx = -1
         val js = """
             (function() {
                 window.open = function() { return null; };
+                if ($restoreEpIdx >= 0) {
+                    window.__pendingRestoreEpIdx = $restoreEpIdx;
+                }
                 if (window.__xboxWatcherInstalled) return;
                 window.__xboxWatcherInstalled = true;
 
@@ -426,6 +567,38 @@ class MainActivity : AppCompatActivity() {
                 setInterval(function() {
                     try {
                         window.open = function() { return null; };
+
+                        // 0. Restaurer automatiquement l'épisode sauvegardé (Favori ou Reprise)
+                        var epSelRestore = document.getElementById('selectEpisodes');
+                        if (typeof window.__pendingRestoreEpIdx === 'number' && window.__pendingRestoreEpIdx >= 0 && epSelRestore && epSelRestore.options.length > window.__pendingRestoreEpIdx) {
+                            var targetIdx = window.__pendingRestoreEpIdx;
+                            window.__pendingRestoreEpIdx = -1;
+                            if (epSelRestore.selectedIndex !== targetIdx) {
+                                epSelRestore.selectedIndex = targetIdx;
+                                if (typeof selectEpisode === 'function') {
+                                    selectEpisode();
+                                } else {
+                                    epSelRestore.dispatchEvent(new Event('change', { bubbles: true }));
+                                }
+                            }
+                        }
+
+                        // Extraire le titre de l'anime/série et le numéro d'épisode actuel pour Favoris, Reprise & AniSkip
+                        var rawTitle = document.title || '';
+                        var hTitle = document.querySelector('#titreOeuvre, h1');
+                        if (hTitle && hTitle.textContent && hTitle.textContent.trim().length > 1) {
+                            rawTitle = hTitle.textContent.trim();
+                        }
+                        var curEpNum = 1;
+                        var curEpIdx = -1;
+                        var curEpLabel = '';
+                        if (epSelRestore && epSelRestore.selectedIndex >= 0 && epSelRestore.options[epSelRestore.selectedIndex]) {
+                            curEpIdx = epSelRestore.selectedIndex;
+                            curEpLabel = epSelRestore.options[curEpIdx].text || ('Épisode ' + (curEpIdx + 1));
+                            var mEp = curEpLabel.match(/(\d+)/);
+                            curEpNum = mEp ? parseInt(mEp[1], 10) : (curEpIdx + 1);
+                        }
+                        XboxBridge.onPageMetadataDetected(rawTitle, curEpNum, curEpIdx, curEpLabel, window.location.href);
 
                         // 1. Détruire uniquement les calques transparents invisibles de pub
                         // sans JAMAIS supprimer le menu mobile, la recherche ou les modales de French Stream !
@@ -601,7 +774,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnResumeLastPage.setOnClickListener {
-            val savedPage = prefs.getString(KEY_LAST_PAGE, ANIME_SAMA_HOME) ?: ANIME_SAMA_HOME
+            val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
+            val savedCastEpIdx = prefs.getInt(KEY_LAST_CAST_EP_IDX, -1)
+            val savedPage = savedCastPage ?: prefs.getString(KEY_LAST_PAGE, ANIME_SAMA_HOME) ?: ANIME_SAMA_HOME
+            if (savedCastEpIdx >= 0) {
+                pendingRestoreEpisodeIdx = savedCastEpIdx
+            }
             loadBrowserUrl(savedPage)
         }
 
@@ -611,6 +789,14 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnHomeFrenchStream.setOnClickListener {
             loadBrowserUrl(FRENCH_STREAM_HOME)
+        }
+
+        // --- Favoris & Séries en cours (1 clic) ---
+        binding.btnFavorites.setOnClickListener {
+            showFavoritesDialog()
+        }
+        binding.btnHomeFavorites.setOnClickListener {
+            showFavoritesDialog()
         }
 
         // --- Scanner les appareils (TV, Xbox...) sur le même Wi-Fi ---
@@ -701,6 +887,7 @@ class MainActivity : AppCompatActivity() {
                     if (res.isSuccess) {
                         isXboxPaused = false
                         binding.btnPlayPause.text = "⏸ PAUSE"
+                        CastForegroundService.updateNotificationState(this@MainActivity, false, currentPlaybackSec)
                         updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
                     }
                 } else {
@@ -708,6 +895,7 @@ class MainActivity : AppCompatActivity() {
                     if (res.isSuccess) {
                         isXboxPaused = true
                         binding.btnPlayPause.text = "▶ PLAY"
+                        CastForegroundService.updateNotificationState(this@MainActivity, true, currentPlaybackSec)
                         updateStatus("En pause sur la TV / Xbox ⏸", isLoading = false)
                     }
                 }
@@ -743,6 +931,69 @@ class MainActivity : AppCompatActivity() {
             jumpBySeconds(+30)
         }
 
+        // --- Télécommande : Volume TV / Xbox (Vol - / Muet / Vol +) ---
+        binding.btnVolDown.setOnClickListener {
+            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
+            lifecycleScope.launch {
+                val res = dlnaController.adjustVolume(ip, -5, lastKnownTvVolume)
+                res.onSuccess { newVol ->
+                    lastKnownTvVolume = newVol
+                    isTvMuted = false
+                    binding.btnVolMute.text = "🔇 Muet"
+                    Toast.makeText(this@MainActivity, "🔉 Volume TV : $newVol%", Toast.LENGTH_SHORT).show()
+                }.onFailure {
+                    Toast.makeText(this@MainActivity, "Volume non supporté par cet appareil DLNA", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        binding.btnVolUp.setOnClickListener {
+            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
+            lifecycleScope.launch {
+                val res = dlnaController.adjustVolume(ip, +5, lastKnownTvVolume)
+                res.onSuccess { newVol ->
+                    lastKnownTvVolume = newVol
+                    isTvMuted = false
+                    binding.btnVolMute.text = "🔇 Muet"
+                    Toast.makeText(this@MainActivity, "🔊 Volume TV : $newVol%", Toast.LENGTH_SHORT).show()
+                }.onFailure {
+                    Toast.makeText(this@MainActivity, "Volume non supporté par cet appareil DLNA", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        binding.btnVolMute.setOnClickListener {
+            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
+            val nextMute = !isTvMuted
+            lifecycleScope.launch {
+                val res = dlnaController.setMute(ip, nextMute)
+                res.onSuccess { muted ->
+                    isTvMuted = muted
+                    binding.btnVolMute.text = if (muted) "🔊 Son ON" else "🔇 Muet"
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (muted) "🔇 TV en mode Muet" else "🔊 Son de la TV rétabli",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }.onFailure {
+                    Toast.makeText(this@MainActivity, "Mute non supporté par cet appareil DLNA", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        // --- Télécommande : Skip Intro Précis (AniSkip API ou +1m25) ---
+        binding.btnSkipIntro.setOnClickListener {
+            val intro = currentIntroWindow
+            if (intro != null && intro.endSec > currentPlaybackSec + 3) {
+                val fmt = formatShortMinSec(intro.endSec)
+                Toast.makeText(this, "⏭ Skip Intro AniSkip → $fmt", Toast.LENGTH_SHORT).show()
+                seekToSeconds(intro.endSec)
+            } else {
+                Toast.makeText(this, "⏭ Skip Intro (+1m25)", Toast.LENGTH_SHORT).show()
+                jumpBySeconds(+85)
+            }
+        }
+
         // --- Télécommande : Arrêter ---
         binding.btnStop.setOnClickListener {
             val ip = binding.etXboxIp.text?.toString()?.trim() ?: ""
@@ -763,6 +1014,161 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // =========================================================================
+    // Gestion des Favoris / Séries en cours (1 clic + mise à jour auto de l'épisode)
+    // =========================================================================
+
+    private fun loadFavorites(): MutableList<FavoriteItem> {
+        val list = mutableListOf<FavoriteItem>()
+        val raw = prefs.getString(KEY_FAVORITES_JSON, null) ?: return list
+        try {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val title = obj.optString("title", "")
+                val url = obj.optString("url", "")
+                val epIdx = obj.optInt("epIdx", -1)
+                val epLabel = obj.optString("epLabel", "")
+                if (title.isNotBlank() && url.isNotBlank()) {
+                    list.add(FavoriteItem(title, url, epIdx, epLabel))
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return list
+    }
+
+    private fun saveFavorites(list: List<FavoriteItem>) {
+        val arr = JSONArray()
+        for (item in list) {
+            val obj = JSONObject().apply {
+                put("title", item.title)
+                put("url", item.url)
+                put("epIdx", item.episodeIndex)
+                put("epLabel", item.episodeLabel)
+            }
+            arr.put(obj)
+        }
+        prefs.edit().putString(KEY_FAVORITES_JSON, arr.toString()).apply()
+    }
+
+    private fun normalizeSeriesBaseUrl(url: String): String {
+        return url.substringBefore("?").substringBefore("#").trimEnd('/').lowercase()
+    }
+
+    private fun updateFavoriteEpisodeIfPresent(pageUrl: String, epIdx: Int, epLabel: String) {
+        if (pageUrl.isBlank() || epIdx < 0) return
+        val favs = loadFavorites()
+        val normPage = normalizeSeriesBaseUrl(pageUrl)
+        var modified = false
+        for (i in favs.indices) {
+            if (normalizeSeriesBaseUrl(favs[i].url) == normPage) {
+                if (favs[i].episodeIndex != epIdx || favs[i].episodeLabel != epLabel) {
+                    favs[i] = favs[i].copy(url = pageUrl, episodeIndex = epIdx, episodeLabel = epLabel)
+                    modified = true
+                }
+            }
+        }
+        if (modified) {
+            saveFavorites(favs)
+        }
+    }
+
+    private fun showFavoritesDialog() {
+        val favs = loadFavorites()
+        val currentUrl = binding.webViewBrowser.url ?: ""
+        val isOnSitePage = binding.layoutHomeHub.visibility != View.VISIBLE &&
+            currentUrl.startsWith("http") &&
+            currentUrl != ANIME_SAMA_HOME &&
+            currentUrl != FRENCH_STREAM_HOME
+
+        val options = mutableListOf<String>()
+        if (isOnSitePage) {
+            val displayTitle = currentPageTitle.ifBlank { currentUrl.substringAfter("://").take(35) }
+            val epSuffix = if (currentEpisodeLabel.isNotBlank()) " ($currentEpisodeLabel)" else ""
+            options.add("➕ Épingler en Favori : $displayTitle$epSuffix")
+        }
+
+        for (fav in favs) {
+            val epInfo = if (fav.episodeLabel.isNotBlank()) " • ${fav.episodeLabel}" else ""
+            options.add("⭐ ${fav.title}$epInfo")
+        }
+
+        if (options.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("⭐ Mes Favoris & Séries en cours")
+                .setMessage("Vous n'avez pas encore de favoris.\n\nOuvrez la page d'un anime ou d'une série puis appuyez sur le bouton ⭐ en haut pour l'épingler ici en 1 clic !")
+                .setPositiveButton("Compris", null)
+                .show()
+            return
+        }
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle("⭐ Mes Favoris & Séries en cours")
+            .setItems(options.toTypedArray()) { _, which ->
+                if (isOnSitePage && which == 0) {
+                    addCurrentPageToFavorites(currentUrl)
+                } else {
+                    val favIdx = if (isOnSitePage) which - 1 else which
+                    val chosen = favs.getOrNull(favIdx) ?: return@setItems
+                    if (chosen.episodeIndex >= 0) {
+                        pendingRestoreEpisodeIdx = chosen.episodeIndex
+                    }
+                    loadBrowserUrl(chosen.url)
+                    Toast.makeText(
+                        this,
+                        "Ouverture de ${chosen.title}${if (chosen.episodeLabel.isNotBlank()) " (${chosen.episodeLabel})" else ""}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            .setNegativeButton("Fermer", null)
+
+        if (favs.isNotEmpty()) {
+            builder.setNeutralButton("🗑 Supprimer un favori") { _, _ ->
+                showDeleteFavoriteDialog(favs)
+            }
+        }
+        builder.show()
+    }
+
+    private fun addCurrentPageToFavorites(currentUrl: String) {
+        val favs = loadFavorites()
+        val normUrl = normalizeSeriesBaseUrl(currentUrl)
+        val cleanTitle = currentPageTitle.ifBlank {
+            currentUrl.substringAfter("/catalogue/").substringBefore("/").replace("-", " ")
+                .replaceFirstChar { it.uppercase() }
+                .ifBlank { "Série / Anime" }
+        }
+        val existingIdx = favs.indexOfFirst { normalizeSeriesBaseUrl(it.url) == normUrl }
+        val newItem = FavoriteItem(
+            title = cleanTitle,
+            url = currentUrl,
+            episodeIndex = currentEpisodeIndex,
+            episodeLabel = currentEpisodeLabel
+        )
+        if (existingIdx >= 0) {
+            favs[existingIdx] = newItem
+        } else {
+            favs.add(0, newItem)
+        }
+        saveFavorites(favs)
+        Toast.makeText(this, "⭐ Ajouté aux favoris : $cleanTitle", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showDeleteFavoriteDialog(favs: MutableList<FavoriteItem>) {
+        val labels = favs.map { "🗑 ${it.title}${if (it.episodeLabel.isNotBlank()) " (${it.episodeLabel})" else ""}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Supprimer quel favori ?")
+            .setItems(labels) { _, which ->
+                val removed = favs.removeAt(which)
+                saveFavorites(favs)
+                Toast.makeText(this, "Favori supprimé : ${removed.title}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Annuler", null)
+            .show()
+    }
+
     /**
      * Scanne le réseau Wi-Fi local pour trouver toutes les TV connectées et consoles Xbox
      * et permet de choisir sur quel appareil caster.
@@ -781,7 +1187,7 @@ class MainActivity : AppCompatActivity() {
             )
 
             val currentIp = binding.etXboxIp.text?.toString()?.trim() ?: DEFAULT_XBOX_IP
-            val listItems = mutableListOf< DlnaController.DiscoveredDevice>()
+            val listItems = mutableListOf<DlnaController.DiscoveredDevice>()
             listItems.addAll(devices)
             if (listItems.none { it.ip == currentIp }) {
                 listItems.add(
@@ -979,7 +1385,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Saute directement à la seconde choisie (via le curseur SeekBar ou les boutons +/- 30s).
+     * Saute directement à la seconde choisie (via le curseur SeekBar, Skip Intro ou les boutons +/- 30s).
      */
     private fun seekToSeconds(rawTargetSec: Int) {
         if (isSeekingNow) return
@@ -1006,12 +1412,14 @@ class MainActivity : AppCompatActivity() {
                     val res = dlnaController.playMediaOnXbox(
                         ip = ip,
                         videoUri = newStreamUrl,
-                        title = "Xbox Video Stream",
+                        title = getDisplayStreamTitle(),
                         durationSeconds = prepared.totalDurationSec
                     )
                     if (res.isSuccess) {
                         isXboxPaused = false
                         binding.btnPlayPause.text = "⏸ PAUSE"
+                        CastForegroundService.updateNotificationState(this@MainActivity, false, currentPlaybackSec)
+                        saveCurrentPlaybackProgress()
                         updateTimerDisplay()
                         updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
                     } else {
@@ -1021,6 +1429,8 @@ class MainActivity : AppCompatActivity() {
                     val seekRes = dlnaController.seekMedia(ip, targetSec)
                     if (seekRes.isSuccess) {
                         currentPlaybackSec = targetSec
+                        CastForegroundService.updateNotificationState(this@MainActivity, isXboxPaused, currentPlaybackSec)
+                        saveCurrentPlaybackProgress()
                         updateTimerDisplay()
                         updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
                     }
@@ -1031,20 +1441,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun getDisplayStreamTitle(): String {
+        val base = currentPageTitle.ifBlank { "Xbox Video Stream" }
+        return if (currentEpisodeLabel.isNotBlank()) "$base • $currentEpisodeLabel" else base
+    }
+
+    private fun saveCurrentPlaybackProgress() {
+        val pageUrl = binding.webViewBrowser.url ?: prefs.getString(KEY_LAST_PAGE, null) ?: return
+        if (!pageUrl.startsWith("http")) return
+        val title = getDisplayStreamTitle()
+        prefs.edit()
+            .putString(KEY_LAST_CAST_PAGE_URL, pageUrl)
+            .putString(KEY_LAST_CAST_TITLE, title)
+            .putInt(KEY_LAST_CAST_EP_IDX, currentEpisodeIndex)
+            .putInt(KEY_LAST_CAST_POS_SEC, currentPlaybackSec)
+            .apply()
+    }
+
     /**
-     * Chronomètre local ultra-fluide (1s) + déclenchement automatique de l'épisode suivant à la fin.
+     * Chronomètre local ultra-fluide (1s) + sauvegarde auto du timestamp ("Reprendre où j'en étais")
+     * + déclenchement automatique de l'épisode suivant à la fin.
      */
     private fun startPositionTracker() {
         stopPositionTracker()
         binding.tvTimer.visibility = View.VISIBLE
         updateTimerDisplay()
         positionTrackerJob = lifecycleScope.launch {
+            var tickCount = 0
             while (isActive && activePreparedStream != null) {
                 delay(1000)
                 val prepared = activePreparedStream ?: break
                 if (!isXboxPaused && !isSeekingNow && currentPlaybackSec < prepared.totalDurationSec) {
                     currentPlaybackSec += 1
+                    CastForegroundService.currentPositionSec = currentPlaybackSec
                     updateTimerDisplay()
+                    tickCount++
+
+                    // Sauvegarder automatiquement la progression toutes les 4 secondes ("Reprendre où j'en étais")
+                    if (tickCount % 4 == 0 && currentPlaybackSec > 10) {
+                        saveCurrentPlaybackProgress()
+                    }
 
                     // Si l'option "Ép. Suivant Auto" est activée et qu'on atteint la fin de l'épisode (à 3s de la fin)
                     if (isAutoNextEnabled &&
@@ -1230,7 +1666,50 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun sendStreamToXbox(rawStreamUrl: String, referer: String, xboxIp: String) {
+    private fun sendStreamToXbox(
+        rawStreamUrl: String,
+        referer: String,
+        xboxIp: String,
+        forceStartFromZero: Boolean = false
+    ) {
+        val currentPageUrl = binding.webViewBrowser.url ?: ""
+        val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
+        val savedCastEpIdx = prefs.getInt(KEY_LAST_CAST_EP_IDX, -1)
+        val savedCastSec = prefs.getInt(KEY_LAST_CAST_POS_SEC, 0)
+
+        // Si on relance le même épisode / film et qu'une progression > 25s a été mémorisée, proposer de reprendre !
+        if (!forceStartFromZero &&
+            savedCastSec > 25 &&
+            !savedCastPage.isNullOrBlank() &&
+            normalizeSeriesBaseUrl(currentPageUrl) == normalizeSeriesBaseUrl(savedCastPage) &&
+            (currentEpisodeIndex == savedCastEpIdx || savedCastEpIdx == -1)
+        ) {
+            runOnUiThread {
+                val fmtTime = dlnaController.formatSecondsToHms(savedCastSec)
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("⏳ Reprendre où vous en étiez ?")
+                    .setMessage("Vous aviez arrêté cet épisode/film à $fmtTime.\nVoulez-vous reprendre directement à $fmtTime ?")
+                    .setPositiveButton("▶ Reprendre à $fmtTime") { _, _ ->
+                        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = savedCastSec)
+                    }
+                    .setNegativeButton("Recommencer (0:00)") { _, _ ->
+                        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = 0)
+                    }
+                    .setCancelable(false)
+                    .show()
+            }
+            return
+        }
+
+        executeStreamCastToDevice(rawStreamUrl, referer, xboxIp, initialStartSec = 0)
+    }
+
+    private fun executeStreamCastToDevice(
+        rawStreamUrl: String,
+        referer: String,
+        xboxIp: String,
+        initialStartSec: Int = 0
+    ) {
         runOnUiThread {
             binding.btnCast.isEnabled = false
             updateStatus("Préparation du cache anti-freeze & envoi à la TV / Xbox...", isLoading = true)
@@ -1245,24 +1724,43 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
+            val safeStartSec = if (initialStartSec > 0 && initialStartSec < prepared.totalDurationSec - 15) {
+                if (prepared.isHls && prepared.segments.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        localStreamProxy.warmupForSeek(prepared, initialStartSec)
+                    }
+                } else {
+                    initialStartSec
+                }
+            } else {
+                0
+            }
+
             activePreparedStream = prepared
             localStreamProxy.activeStream = prepared
-            currentPlaybackSec = 0
+            currentPlaybackSec = safeStartSec
             isXboxPaused = false
 
-            val proxiedUrl = localStreamProxy.buildPlaybackUrl(prepared, startSeconds = 0)
+            // Lancer la recherche AniSkip des horaires exacts de l'intro pour cet épisode
+            val pageUrl = binding.webViewBrowser.url ?: ""
+            refreshAniSkipIntroForCurrentEpisode(pageUrl, currentPageTitle, currentEpisodeNumber)
+
+            val proxiedUrl = localStreamProxy.buildPlaybackUrl(prepared, startSeconds = safeStartSec)
+            val streamTitle = getDisplayStreamTitle()
 
             val castResult = dlnaController.playMediaOnXbox(
                 ip = xboxIp,
                 videoUri = proxiedUrl,
-                title = "Xbox Video Stream",
+                title = streamTitle,
                 durationSeconds = prepared.totalDurationSec
             )
 
             castResult.onSuccess {
                 val devName = prefs.getString(KEY_DEVICE_NAME, null) ?: "Xbox / TV ($xboxIp)"
                 window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                CastForegroundService.startService(this@MainActivity, xboxIp, devName)
+                CastForegroundService.startService(this@MainActivity, xboxIp, devName, streamTitle)
+                CastForegroundService.currentPositionSec = safeStartSec
+                saveCurrentPlaybackProgress()
                 updateStatus(getString(R.string.status_playing), isLoading = false)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))
                 binding.btnCast.isEnabled = true
@@ -1288,6 +1786,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        if (CastForegroundService.remoteActionListener === this) {
+            CastForegroundService.remoteActionListener = null
+        }
         stopPositionTracker()
         videoStreamSniffer.cleanup()
         // Ne JAMAIS arrêter localStreamProxy ni CastForegroundService si une diffusion est en cours :
