@@ -17,6 +17,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.xboxvideocaster.MainActivity
+import com.xboxvideocaster.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -388,7 +389,7 @@ class CastForegroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("📺 $currentDeviceName • $currentTitleText")
             .setContentText("$statusPrefix • Touchez pour ouvrir l'application")
-            .setSmallIcon(playPauseIcon)
+            .setSmallIcon(R.drawable.ic_castflow_notification)
             .setContentIntent(pendingOpen)
             .setOngoing(true)
             .setSilent(true)

@@ -73,7 +73,8 @@ class LocalStreamProxy(private val context: Context) {
         @Volatile var highestServedSegmentIdx: Int = 0,
         @Volatile var lastSeekTargetSec: Int = 0,
         @Volatile var lastSeekOrStartWallMs: Long = System.currentTimeMillis(),
-        @Volatile var currentConfirmedPlaybackSec: Int = 0
+        @Volatile var currentConfirmedPlaybackSec: Int = 0,
+        @Volatile var isPlayable: Boolean = true
     )
 
     private val httpClient = OkHttpClient.Builder()
@@ -184,6 +185,9 @@ class LocalStreamProxy(private val context: Context) {
         if (isHls) {
             segments = parseHlsSegments(realStreamUrl, ref, ua)
             totalDuration = segments.sumOf { it.durationSec }.toInt()
+        var isPlayable = true
+        if (isHls && segments.isEmpty()) {
+            isPlayable = false
         }
 
         val prepared = PreparedStream(
@@ -197,20 +201,28 @@ class LocalStreamProxy(private val context: Context) {
             highestServedSegmentIdx = 0,
             lastSeekTargetSec = 0,
             lastSeekOrStartWallMs = System.currentTimeMillis(),
-            currentConfirmedPlaybackSec = 0
+            currentConfirmedPlaybackSec = 0,
+            isPlayable = isPlayable
         )
         streamRegistry[id] = prepared
 
         if (segments.isNotEmpty()) {
             triggerPrefetch(prepared, 0, 3)
             val prebufferCount = min(2, segments.size)
+            var initialBytesOk = false
             for (i in 0 until prebufferCount) {
-                try {
+                val ok = try {
                     ensureSegmentDownload(segments[i].url, prepared.referer, prepared.userAgent)
-                        .get(10, TimeUnit.SECONDS)
+                        .get(8, TimeUnit.SECONDS) != null
                 } catch (_: Exception) {
+                    false
                 }
+                if (i == 0 && ok) initialBytesOk = true
+                if (!ok) break // Lien mort : inutile d'attendre les segments suivants
             }
+            prepared.isPlayable = initialBytesOk
+        } else if (!isHls) {
+            prepared.isPlayable = checkDirectMp4Playable(prepared)
         }
 
         return prepared
@@ -453,7 +465,16 @@ class LocalStreamProxy(private val context: Context) {
             }
             if (rawBytes == null) {
                 segmentFutures.remove(segUrl)
-                rawBytes = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent) ?: continue
+                // Réessayer jusqu'à 3 fois (serveur lent / micro-coupure) avant de sauter ce morceau
+                for (retry in 1..3) {
+                    rawBytes = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent)
+                    if (rawBytes != null) break
+                    try { Thread.sleep(1000L * retry) } catch (_: InterruptedException) { break }
+                }
+                if (rawBytes == null) {
+                    Log.w("LocalStreamProxy", "Segment $i introuvable après plusieurs essais, saut")
+                    continue
+                }
             }
 
             // SMART PACING : après avoir envoyé les 4 premiers segments (~40s de buffer initial rapide),
@@ -605,24 +626,18 @@ class LocalStreamProxy(private val context: Context) {
      * Vérifie que la vidéo est réellement lisible AVANT de l'envoyer à la TV
      * (lien mort, lecteur supprimé, serveur qui bloque...). Évite que la TV tourne dans le vide.
      */
-    fun isStreamPlayable(prepared: PreparedStream): Boolean {
+    fun isStreamPlayable(prepared: PreparedStream): Boolean = prepared.isPlayable
+
+    private fun checkDirectMp4Playable(prepared: PreparedStream): Boolean {
         return try {
-            if (prepared.isHls) {
-                if (prepared.segments.isEmpty()) return false
-                val first = ensureSegmentDownload(
-                    prepared.segments[0].url, prepared.referer, prepared.userAgent
-                ).get(12, TimeUnit.SECONDS)
-                first != null && first.isNotEmpty()
-            } else {
-                val reqBuilder = Request.Builder()
-                    .url(prepared.originalUrl)
-                    .header("User-Agent", prepared.userAgent)
-                    .header("Referer", prepared.referer)
-                    .header("Range", "bytes=0-1023")
-                httpClient.newCall(reqBuilder.build()).execute().use { resp ->
-                    val type = resp.header("Content-Type")?.lowercase(Locale.ROOT) ?: ""
-                    resp.isSuccessful && !type.contains("text/html")
-                }
+            val reqBuilder = Request.Builder()
+                .url(prepared.originalUrl)
+                .header("User-Agent", prepared.userAgent)
+                .header("Referer", prepared.referer)
+                .header("Range", "bytes=0-1023")
+            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                val type = resp.header("Content-Type")?.lowercase(Locale.ROOT) ?: ""
+                resp.isSuccessful && !type.contains("text/html")
             }
         } catch (_: Exception) {
             false

@@ -302,7 +302,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             if (release != null) {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("🚀 Mise à jour disponible (${release.tagName})")
-                    .setMessage("Une nouvelle version de Xbox Video Caster est disponible. Voulez-vous la télécharger et l'installer automatiquement ?")
+                    .setMessage("Une nouvelle version de CastFlow est disponible. Voulez-vous la télécharger et l'installer automatiquement ?")
                     .setPositiveButton("Mettre à jour maintenant") { _, _ ->
                         startAutoUpdate(release.apkDownloadUrl)
                     }
@@ -837,7 +837,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         lastDetectedReferer = referer
         runOnUiThread {
             if (activePreparedStream == null) {
-                updateStatus("✅ Flux vidéo prêt ! Appuyez sur LANCER SUR LA XBOX.", isLoading = false)
+                updateStatus("✅ Flux vidéo prêt ! Appuyez sur LANCER SUR LA TV.", isLoading = false)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
             }
         }
@@ -1743,7 +1743,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         ip = ip,
                         videoUri = newStreamUrl,
                         title = getDisplayStreamTitle(),
-                        durationSeconds = prepared.totalDurationSec
+                        durationSeconds = prepared.totalDurationSec,
+                        stopFirst = false // Ne pas fermer le lecteur de la TV : saut plus rapide
                     )
                     if (res.isSuccess) {
                         isXboxPaused = false
@@ -1772,7 +1773,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     }
 
     private fun getDisplayStreamTitle(): String {
-        val base = currentPageTitle.ifBlank { "Xbox Video Stream" }
+        val base = currentPageTitle.ifBlank { "CastFlow Stream" }
         return if (currentEpisodeLabel.isNotBlank()) "$base • $currentEpisodeLabel" else base
     }
 
@@ -1821,12 +1822,26 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     tickCount++
                     if (!tvConfirmedPlaying) secondsWithoutTvProgress++
 
-                    // Vérifier si la TV a bien démarré la lecture (sans écraser le chrono qui gère les sauts)
-                    if (tickCount % 5 == 0 && !tvConfirmedPlaying) {
+                    // SYNCHRO TV toutes les 5s : position réelle = seconde de départ de l'URL en cours + temps relatif de la TV
+                    if (tickCount % 5 == 0) {
                         val ipSync = binding.etXboxIp.text?.toString()?.trim() ?: ""
                         if (ipSync.isNotBlank()) {
+                            val streamIdAtQuery = prepared.id
+                            val urlStartSec = prepared.lastSeekTargetSec
+                            val urlAgeMs = System.currentTimeMillis() - prepared.lastSeekOrStartWallMs
                             val tvSec = dlnaController.getElapsedSeconds(ipSync)
-                            if (tvSec > 0) {
+                            if (tvSec > 0 && activePreparedStream?.id == streamIdAtQuery && !isSeekingNow) {
+                                // Attendre 10s après un lancement/saut (la TV peut encore donner l'ancienne position)
+                                if (urlAgeMs > 10_000L) {
+                                    val realSec = (urlStartSec + tvSec).coerceAtMost(prepared.totalDurationSec)
+                                    val diff = kotlin.math.abs(realSec - currentPlaybackSec)
+                                    if (diff in 4..90) {
+                                        currentPlaybackSec = realSec
+                                        CastForegroundService.currentPositionSec = realSec
+                                        prepared.currentConfirmedPlaybackSec = realSec
+                                        updateTimerDisplay()
+                                    }
+                                }
                                 tvConfirmedPlaying = true
                                 secondsWithoutTvProgress = 0
                                 if (stuckWarningShown) {
