@@ -77,15 +77,33 @@ class LocalStreamProxy(private val context: Context) {
     )
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .followRedirects(true)
-        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(12, 5, TimeUnit.MINUTES))
         .build()
 
     private val streamRegistry = ConcurrentHashMap<String, PreparedStream>()
     private val segmentFutures = ConcurrentHashMap<String, Future<ByteArray?>>()
-    private val prefetchPool = Executors.newFixedThreadPool(3)
+    private val prefetchPool = Executors.newFixedThreadPool(4)
+    private val streamSockets = ConcurrentHashMap<String, MutableSet<Socket>>()
+
+    fun terminateStreamSockets(streamId: String) {
+        val sockets = streamSockets.remove(streamId) ?: return
+        for (s in sockets) {
+            try {
+                s.close()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun registerClientSocket(streamId: String, socket: Socket) {
+        streamSockets.computeIfAbsent(streamId) { ConcurrentHashMap.newKeySet() }.add(socket)
+    }
+
+    private fun unregisterClientSocket(streamId: String, socket: Socket) {
+        streamSockets[streamId]?.remove(socket)
+    }
 
     fun start() {
         if (isRunning) return
@@ -340,10 +358,15 @@ class LocalStreamProxy(private val context: Context) {
                 val prepared = streamRegistry[streamId] ?: streamRegistry.values.lastOrNull() ?: return
                 val out = client.getOutputStream()
 
-                if (prepared.isHls) {
-                    serveBufferedHlsStream(method, prepared, startSec, rangeHeader, out)
-                } else {
-                    serveDirectMp4(method, prepared, rangeHeader, out)
+                registerClientSocket(prepared.id, client)
+                try {
+                    if (prepared.isHls) {
+                        serveBufferedHlsStream(method, prepared, startSec, rangeHeader, out)
+                    } else {
+                        serveDirectMp4(method, prepared, rangeHeader, out)
+                    }
+                } finally {
+                    unregisterClientSocket(prepared.id, client)
                 }
             } catch (e: Exception) {
                 Log.w("LocalStreamProxy", "Client connection closed: ${e.message}")
@@ -373,6 +396,7 @@ class LocalStreamProxy(private val context: Context) {
             append("Content-Type: video/vnd.dlna.mpeg-tts\r\n")
             append("transferMode.dlna.org: Streaming\r\n")
             append("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+            append("Accept-Ranges: none\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
             append("Connection: keep-alive\r\n\r\n")
         }
@@ -415,15 +439,15 @@ class LocalStreamProxy(private val context: Context) {
             triggerPrefetch(prepared, i + 1, 4)
 
             // Libérer la RAM des segments déjà consommés
-            if (i - 3 >= 0) {
-                segmentFutures.remove(segments[i - 3].url)
+            if (i - 4 >= 0) {
+                segmentFutures.remove(segments[i - 4].url)
             }
 
             val seg = segments[i]
             val segUrl = seg.url
             var rawBytes = try {
                 ensureSegmentDownload(segUrl, prepared.referer, prepared.userAgent)
-                    .get(25, TimeUnit.SECONDS)
+                    .get(16, TimeUnit.SECONDS)
             } catch (_: Exception) {
                 null
             }
@@ -432,11 +456,11 @@ class LocalStreamProxy(private val context: Context) {
                 rawBytes = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent) ?: continue
             }
 
-            // SMART PACING : après avoir envoyé les 3 premiers segments (~30s de buffer initial rapide),
-            // ne jamais dépasser +32 secondes d'avance sur le temps réel de lecture de la TV !
-            // Cela garantit que le buffer interne de la Smart TV ne sature jamais (fini le rollback à 5 min et le "Signal faible").
+            // SMART PACING : après avoir envoyé les 4 premiers segments (~40s de buffer initial rapide),
+            // réguler l'envoi pour maintenir un coussin de sécurité d'environ ~40-45s d'avance sur la TV.
+            // Cela absorbe complètement les micro-latences Wi-Fi quand l'écran du téléphone est éteint.
             val segmentsSentOnThisConn = i - startIndex
-            if (segmentsSentOnThisConn >= 3) {
+            if (segmentsSentOnThisConn >= 4) {
                 while (true) {
                     if (CastForegroundService.isPausedState) {
                         // Si la TV est en pause, patienter doucement sans couper le socket
@@ -450,7 +474,7 @@ class LocalStreamProxy(private val context: Context) {
                     val realElapsedSec = (System.currentTimeMillis() - connectionStartWallMs) / 1000.0
                     val videoElapsedSec = seg.startTimeSec - connectionBaseVideoSec
                     val bufferAheadSec = videoElapsedSec - realElapsedSec
-                    if (bufferAheadSec <= 30.0) {
+                    if (bufferAheadSec <= 45.0) {
                         break
                     }
                     try {

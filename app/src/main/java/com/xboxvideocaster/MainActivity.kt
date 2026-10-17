@@ -201,6 +201,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             restoreBlankedWebViewIframe()
             binding.layoutRemoteControls.visibility = View.GONE
             binding.tvTimer.visibility = View.GONE
+            binding.tvPlayerStreamTitle.visibility = View.GONE
+            updateCastButtonUi(isCastActive = false)
             updateStatus("Lecture arrêtée depuis la notification", isLoading = false)
         }
     }
@@ -249,6 +251,10 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             binding.layoutRemoteControls.visibility = View.VISIBLE
             binding.tvTimer.visibility = View.VISIBLE
+            val streamTitle = getDisplayStreamTitle()
+            binding.tvPlayerStreamTitle.text = streamTitle
+            binding.tvPlayerStreamTitle.visibility = View.VISIBLE
+            updateCastButtonUi(isCastActive = true)
             binding.btnPlayPause.text = if (isXboxPaused) "▶ PLAY" else "⏸ PAUSE"
             updateStatus("Diffusion active en cours sur la TV / Xbox 🎮", isLoading = false)
             binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
@@ -267,6 +273,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             exitPhoneFullscreen()
         }
         binding.layoutHomeHub.visibility = View.VISIBLE
+        binding.layoutTopBarRow2.visibility = View.GONE
         val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
         val savedCastTitle = prefs.getString(KEY_LAST_CAST_TITLE, null)
         val savedCastSec = prefs.getInt(KEY_LAST_CAST_POS_SEC, 0)
@@ -343,13 +350,26 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         if (!savedCtrlUrl.isNullOrBlank()) {
             dlnaController.setPreferredControlUrl(savedCtrlUrl)
         }
-        val savedDevName = prefs.getString(KEY_DEVICE_NAME, null)
-        if (!savedDevName.isNullOrBlank()) {
-            binding.btnCast.text = "📺 LANCER SUR ${savedDevName.substringBefore(" (").uppercase()}"
-        }
+        updateCastButtonUi()
 
         isAutoNextEnabled = prefs.getBoolean(KEY_AUTO_NEXT, false)
         updateAutoNextButtonUi()
+    }
+
+    private fun updateCastButtonUi(isCastActive: Boolean = (activePreparedStream != null)) {
+        val savedDevName = prefs.getString(KEY_DEVICE_NAME, null)
+        val devLabel = if (!savedDevName.isNullOrBlank()) {
+            savedDevName.substringBefore(" (").uppercase()
+        } else {
+            "SMART TV / XBOX"
+        }
+        if (isCastActive) {
+            binding.btnCast.text = "🟢 EN DIFFUSION SUR $devLabel"
+            binding.btnCast.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#15803D"))
+        } else {
+            binding.btnCast.text = "📺 LANCER SUR $devLabel"
+            binding.btnCast.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#107C10"))
+        }
     }
 
     private fun updateAutoNextButtonUi() {
@@ -925,21 +945,18 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 Toast.makeText(this, "Veuillez entrer l'IP ou scanner votre TV / Xbox", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            prefs.edit().putString(KEY_XBOX_IP, ip).apply()
-            pauseWebViewPlayback()
-
-            val readyStream = lastDetectedStreamUrl
-            if (!readyStream.isNullOrBlank() && VideoStreamSniffer.isVideoStreamUrl(readyStream)) {
-                sendStreamToXbox(readyStream, lastDetectedReferer, ip)
+            if (activePreparedStream != null) {
+                AlertDialog.Builder(this)
+                    .setTitle("📺 Vidéo déjà en cours de diffusion")
+                    .setMessage("Une vidéo est déjà en cours de lecture sur votre écran. Voulez-vous relancer cette vidéo ou en diffuser une nouvelle ?")
+                    .setPositiveButton("Relancer / Diffuser") { _, _ ->
+                        proceedWithCast(ip)
+                    }
+                    .setNegativeButton("Annuler", null)
+                    .show()
                 return@setOnClickListener
             }
-
-            val targetUrl = currentIframeEmbedUrl ?: binding.webViewBrowser.url ?: binding.etVideoUrl.text.toString().trim()
-            if (targetUrl.isBlank()) {
-                Toast.makeText(this, "Choisissez d'abord un film ou un épisode", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            startExtractionAndCast(targetUrl, ip)
+            proceedWithCast(ip)
         }
 
         // --- Télécommande : Pause / Play ---
@@ -1035,10 +1052,30 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     dlnaController.stopMedia(ip)
                     binding.layoutRemoteControls.visibility = View.GONE
                     binding.tvTimer.visibility = View.GONE
+                    binding.tvPlayerStreamTitle.visibility = View.GONE
+                    updateCastButtonUi(isCastActive = false)
                     updateStatus("Lecture arrêtée sur la TV / Xbox", isLoading = false)
                 }
             }
         }
+    }
+
+    private fun proceedWithCast(ip: String) {
+        prefs.edit().putString(KEY_XBOX_IP, ip).apply()
+        pauseWebViewPlayback()
+
+        val readyStream = lastDetectedStreamUrl
+        if (!readyStream.isNullOrBlank() && VideoStreamSniffer.isVideoStreamUrl(readyStream)) {
+            sendStreamToXbox(readyStream, lastDetectedReferer, ip)
+            return
+        }
+
+        val targetUrl = currentIframeEmbedUrl ?: binding.webViewBrowser.url ?: binding.etVideoUrl.text.toString().trim()
+        if (targetUrl.isBlank()) {
+            Toast.makeText(this, "Choisissez d'abord un film ou un épisode", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startExtractionAndCast(targetUrl, ip)
     }
 
     /**
@@ -1049,6 +1086,12 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         val panel = binding.layoutCollapsibleControls
         if (collapse) {
             binding.btnToggleBottomPanel.text = "▲ Ouvrir"
+            if (activePreparedStream != null) {
+                val title = getDisplayStreamTitle()
+                val currentStr = dlnaController.formatSecondsToHms(currentPlaybackSec)
+                val totalStr = dlnaController.formatSecondsToHms(activePreparedStream?.totalDurationSec ?: 0)
+                binding.tvStatus.text = "🟢 $title ($currentStr / $totalStr)"
+            }
             val heightToSlide = panel.height.takeIf { it > 0 }?.toFloat() ?: 220f
             panel.animate()
                 .translationY(heightToSlide)
@@ -1061,6 +1104,9 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 .start()
         } else {
             binding.btnToggleBottomPanel.text = "▼ Réduire"
+            if (activePreparedStream != null) {
+                updateStatus("Lecture en cours sur la TV / Xbox 🎮", isLoading = false)
+            }
             panel.visibility = View.VISIBLE
             panel.alpha = 0f
             panel.translationY = 180f
@@ -1301,7 +1347,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         .putString(KEY_DEVICE_NAME, cleanName)
                         .putString(KEY_DEVICE_CTRL_URL, ctrlUrl)
                         .apply()
-                    binding.btnCast.text = "📺 LANCER SUR ${cleanName.uppercase()}"
+                    updateCastButtonUi()
                     Toast.makeText(
                         this@MainActivity,
                         "Appareil sélectionné : ${chosen.name}",
@@ -1461,6 +1507,11 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         val nextPrepared = preloadedNextPreparedStream
         val ip = binding.etXboxIp.text?.toString()?.trim() ?: DEFAULT_XBOX_IP
 
+        // IMPORTANT : Fermer immédiatement tout socket client en cours sur l'ancien flux (currentPrepared.id)
+        // pour éviter que la TV ne finisse de vider le reliquat du buffer de l'ancien flux et déclenche un OnCompletion
+        // qui remettrait le nouvel épisode à 0:00 au bout de quelques secondes !
+        localStreamProxy.terminateStreamSockets(currentPrepared.id)
+
         if (nextPrepared != null) {
             val targetEpIdx = if (preloadedForEpisodeIndex >= 0) preloadedForEpisodeIndex else (currentEpisodeIndex + 1)
             preloadedNextPreparedStream = null
@@ -1486,6 +1537,9 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
 
             runOnUiThread {
                 updateStatus("⏭ Enchaînement fluide : $streamTitle en cours...", isLoading = false)
+                binding.tvPlayerStreamTitle.text = streamTitle
+                binding.tvPlayerStreamTitle.visibility = View.VISIBLE
+                updateCastButtonUi(isCastActive = true)
                 updateTimerDisplay()
                 binding.btnPlayPause.text = "⏸ PAUSE"
                 saveCurrentPlaybackProgress()
@@ -1801,6 +1855,14 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             binding.tvCurrentTime.text = currentStr
             binding.seekBarProgress.progress = currentPlaybackSec.coerceIn(0, safeMax)
         }
+        val title = getDisplayStreamTitle()
+        if (binding.tvPlayerStreamTitle.visibility != View.VISIBLE || binding.tvPlayerStreamTitle.text != title) {
+            binding.tvPlayerStreamTitle.text = title
+            binding.tvPlayerStreamTitle.visibility = View.VISIBLE
+        }
+        if (isBottomPanelCollapsed) {
+            binding.tvStatus.text = "🟢 $title ($currentStr / $totalStr)"
+        }
     }
 
     private fun setupBackNavigation() {
@@ -1835,6 +1897,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             currentUrl.contains("fs", ignoreCase = true)
         ) {
             binding.layoutHomeHub.visibility = View.GONE
+            binding.layoutTopBarRow2.visibility = View.VISIBLE
             val safeQuery = input.replace("\\", "\\\\").replace("'", "\\'")
             val jsSearchFs = """
                 (function() {
@@ -1866,6 +1929,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
 
     private fun loadBrowserUrl(url: String) {
         binding.layoutHomeHub.visibility = View.GONE
+        binding.layoutTopBarRow2.visibility = View.VISIBLE
         lastDetectedStreamUrl = null
         currentIframeEmbedUrl = null
         if (activePreparedStream == null) {
@@ -2053,6 +2117,9 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 saveCurrentPlaybackProgress()
                 updateStatus(getString(R.string.status_playing), isLoading = false)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))
+                binding.tvPlayerStreamTitle.text = streamTitle
+                binding.tvPlayerStreamTitle.visibility = View.VISIBLE
+                updateCastButtonUi(isCastActive = true)
                 binding.btnCast.isEnabled = true
                 binding.btnPlayPause.text = "⏸ PAUSE"
                 binding.layoutRemoteControls.visibility = View.VISIBLE
@@ -2060,6 +2127,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 Toast.makeText(this@MainActivity, "Lecture lancée sur $devName ! 🎮", Toast.LENGTH_SHORT).show()
             }.onFailure { error ->
                 updateStatus("Erreur connexion (${xboxIp}) : ${error.localizedMessage}", isLoading = false)
+                updateCastButtonUi(isCastActive = false)
                 binding.btnCast.isEnabled = true
                 Toast.makeText(
                     this@MainActivity,

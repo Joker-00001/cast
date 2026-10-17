@@ -86,6 +86,7 @@
 
         <!-- Row 2: Quick Site Shortcuts + Favoris + URL Bar -->
         <LinearLayout
+            android:id="@+id/layoutTopBarRow2"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
@@ -411,8 +412,9 @@
                 android:ellipsize="end"
                 android:maxLines="1"
                 android:text="Choisissez un site pour commencer"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
+                android:textColor="#4ADE80"
+                android:textSize="12sp"
+                android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/tvTimer"
@@ -458,6 +460,20 @@
                 android:layout_marginBottom="6dp"
                 android:orientation="vertical"
                 android:visibility="gone">
+
+                <!-- Titre de l'épisode / film en cours -->
+                <TextView
+                    android:id="@+id/tvPlayerStreamTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="4dp"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="Flux vidéo actif"
+                    android:textColor="@color/white"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
 
                 <!-- Barre de progression (Slider manuel) -->
                 <LinearLayout
@@ -626,7 +642,7 @@
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
                     android:paddingHorizontal="4dp"
-                    android:text="⛶ Plein écran"
+                    android:text="⛶ Écran tél"
                     android:textColor="#38BDF8"
                     android:textSize="10.5sp"
                     android:textStyle="bold"
