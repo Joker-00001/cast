@@ -394,7 +394,7 @@ class MainActivity : AppCompatActivity() {
                 window.__xboxWatcherInstalled = true;
 
                 var style = document.createElement('style');
-                style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit, #fss-tvload, .adsbygoogle, [id*="ad-"], [class*="ad-"], [id*="pub"], iframe[src*="ads"] { display: none !important; pointer-events: none !important; } .nav-menu > li, .st-tabs span, .short, .sect-t, .container2 { opacity: 1 !important; }';
+                style.innerHTML = '.ad-container, #bannLeft, #bannRight, #bannBot, #squBot, #bandeau-pubs-nuit, #fss-tvload, #fss-ad-top, .adsbygoogle, [id*="pub"], iframe[src*="ads"] { display: none !important; pointer-events: none !important; } .nav-menu > li, .st-tabs span, .short, .sect-t, .container2 { opacity: 1 !important; } @media screen and (max-width: 768px) { .header-outer, #header.header, #header.header .header-in { height: auto !important; min-height: 52px !important; overflow: visible !important; } .header .hd-right, #hd-right { display: block !important; position: relative !important; top: auto !important; right: auto !important; width: 100% !important; padding: 6px 10px 10px 10px !important; box-sizing: border-box !important; clear: both !important; z-index: 1002 !important; } .header .search-wrap, #hd-right .search-wrap { width: 100% !important; display: block !important; } #story { width: 100% !important; height: 38px !important; font-size: 14px !important; padding: 0 40px 0 12px !important; background-color: #2b2b2b !important; color: #fff !important; border: 1px solid #f48625 !important; border-radius: 8px !important; box-sizing: border-box !important; pointer-events: auto !important; } #hd-right details.topnav-account, #hd-right .fss-lang-dropdown { display: none !important; } }';
                 document.head.appendChild(style);
 
                 var lecSelInit = document.getElementById('selectLecteurs');
@@ -415,13 +415,28 @@ class MainActivity : AppCompatActivity() {
                     try {
                         window.open = function() { return null; };
 
-                        // 1. Détruire les calques transparents invisibles de pub
+                        // 1. Détruire uniquement les calques transparents invisibles de pub
+                        // sans JAMAIS supprimer le menu mobile, la recherche ou les modales de French Stream !
                         var allDivs = document.querySelectorAll('div, a, aside');
                         for (var d = 0; d < allDivs.length; d++) {
                             var el = allDivs[d];
+                            var idAndCls = ((el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '')).toLowerCase();
+                            if (idAndCls.indexOf('fs-') !== -1 ||
+                                idAndCls.indexOf('fss-') !== -1 ||
+                                idAndCls.indexOf('search') !== -1 ||
+                                idAndCls.indexOf('header') !== -1 ||
+                                idAndCls.indexOf('menu') !== -1 ||
+                                idAndCls.indexOf('modal') !== -1 ||
+                                idAndCls.indexOf('login') !== -1 ||
+                                idAndCls.indexOf('topnav') !== -1 ||
+                                idAndCls.indexOf('custom-mb') !== -1 ||
+                                idAndCls.indexOf('suggest') !== -1 ||
+                                el.querySelector('input, form, button, select')) {
+                                continue;
+                            }
                             var st = window.getComputedStyle(el);
                             var z = parseInt(st.zIndex, 10) || 0;
-                            if ((st.position === 'fixed' || st.position === 'absolute') && z > 99999 && el.id !== 'loginModal') {
+                            if ((st.position === 'fixed' || st.position === 'absolute') && z > 99999) {
                                 el.remove();
                             }
                         }
@@ -623,7 +638,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnGoUrl.setOnClickListener {
             val rawInput = binding.etVideoUrl.text?.toString()?.trim() ?: ""
             if (rawInput.isNotBlank()) {
-                loadBrowserUrl(normalizeUrlOrSearch(rawInput))
+                handleTopBarSearchOrUrl(rawInput)
             }
         }
 
@@ -633,7 +648,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 val rawInput = binding.etVideoUrl.text?.toString()?.trim() ?: ""
                 if (rawInput.isNotBlank()) {
-                    loadBrowserUrl(normalizeUrlOrSearch(rawInput))
+                    handleTopBarSearchOrUrl(rawInput)
                 }
                 true
             } else {
@@ -1069,6 +1084,39 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+    }
+
+    private fun handleTopBarSearchOrUrl(input: String) {
+        if (input.startsWith("http://") || input.startsWith("https://")) {
+            loadBrowserUrl(input)
+            return
+        }
+        if (input.contains(".") && !input.contains(" ")) {
+            loadBrowserUrl("https://$input")
+            return
+        }
+        val currentUrl = binding.webViewBrowser.url ?: ""
+        if (currentUrl.contains("fs26", ignoreCase = true) ||
+            currentUrl.contains("french-stream", ignoreCase = true) ||
+            currentUrl.contains("fs", ignoreCase = true)
+        ) {
+            binding.layoutHomeHub.visibility = View.GONE
+            val safeQuery = input.replace("\\", "\\\\").replace("'", "\\'")
+            val jsSearchFs = """
+                (function() {
+                    var s = document.getElementById('story');
+                    var f = document.getElementById('quicksearch');
+                    if (s && f) {
+                        s.value = '$safeQuery';
+                        s.dispatchEvent(new Event('input', { bubbles: true }));
+                        f.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                    }
+                })();
+            """.trimIndent()
+            binding.webViewBrowser.evaluateJavascript(jsSearchFs, null)
+            return
+        }
+        loadBrowserUrl(normalizeUrlOrSearch(input))
     }
 
     private fun normalizeUrlOrSearch(input: String): String {

@@ -83,8 +83,8 @@ class LocalStreamProxy(private val context: Context) {
 
     private val streamRegistry = ConcurrentHashMap<String, PreparedStream>()
     private val segmentFutures = ConcurrentHashMap<String, Future<ByteArray?>>()
-    // 2 threads max pour ne JAMAIS saturer l'antenne Wi-Fi du téléphone pendant qu'il envoie le flux à la Smart TV !
-    private val prefetchPool = Executors.newFixedThreadPool(2)
+    // 3 threads max pour ne pas saturer l'antenne Wi-Fi du téléphone pendant qu'il envoie le flux à la Smart TV
+    private val prefetchPool = Executors.newFixedThreadPool(3)
 
     fun start() {
         if (isRunning) return
@@ -348,7 +348,7 @@ class LocalStreamProxy(private val context: Context) {
             append("transferMode.dlna.org: Streaming\r\n")
             append("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
-            append("Connection: keep-alive\r\n\r\n")
+            append("Connection: close\r\n\r\n")
         }
         out.write(headers.toByteArray())
         out.flush()
@@ -371,9 +371,9 @@ class LocalStreamProxy(private val context: Context) {
         for (i in startIndex until segments.size) {
             prepared.lastServedSegmentIdx = i
 
-            // Pré-charger uniquement 3 segments d'avance (sur 2 threads) pour garder le Wi-Fi fluide vers la TV
-            // et ne jamais dépasser ~30 Mo de RAM sur le téléphone
-            triggerPrefetch(prepared, i + 1, 3)
+            // Pré-charger 4 segments d'avance (sur 3 threads) pour garder le Wi-Fi fluide vers la TV
+            // tout en ayant ~40-60s d'avance en RAM
+            triggerPrefetch(prepared, i + 1, 4)
 
             // Libérer la RAM au fur et à mesure (garder les 2 derniers segments)
             if (i - 2 >= 0) {
@@ -424,9 +424,10 @@ class LocalStreamProxy(private val context: Context) {
     /**
      * Nettoie un segment MPEG-TS (paquets de 188 octets) :
      * 1. Supprime les paquets de bourrage illégaux (AFC=3 avec adaptation_field_length >= 183).
-     * 2. Supprime la piste fantôme ID3 (PID 0x0102) et les tables PAT/PMT dupliquées sur les segments suivants
-     *    (pour que la Xbox voie un flux unique continu sans réinitialisation toutes les 10s).
-     * 3. Remplace le PMT initial par un PMT H.264+AAC pur et ré-indexe les Continuity Counters (CC).
+     * 2. Supprime la piste fantôme ID3 (PID 0x0102).
+     * 3. Conserve les tables PAT (PID 0x0000) et remplace le PMT (PID 0x0FFF) par un PMT H.264+AAC propre
+     *    avec Continuity Counter (CC) continu dans chaque segment (indispensable pour que les Smart TV
+     *    ne perdent pas le signal PSI au bout de quelques minutes !).
      */
     private fun sanitizeTsSegment(
         raw: ByteArray,
@@ -463,13 +464,9 @@ class LocalStreamProxy(private val context: Context) {
                 continue
             }
 
-            // Supprimer les répétitions de PAT (PID 0) et PMT (PID 0x0FFF) aux frontières des segments suivants
-            // afin que le démultiplexeur Xbox ne réinitialise jamais l'interface TV toutes les 10 secondes !
-            if (!isFirstSegment && (pid == 0x0000 || pid == 0x0FFF)) {
-                continue
-            }
-
-            if (isFirstSegment && pid == 0x0FFF) {
+            // Remplacer le PMT (PID 0x0FFF) dans chaque segment par notre PMT propre (sans piste ID3 0x0102)
+            // tout en conservant PAT (PID 0) et PMT (PID 0x0FFF) pour que la Smart TV garde le verrouillage du signal !
+            if (pid == 0x0FFF) {
                 System.arraycopy(cleanPmtPacket, 0, outBuf, outPos, 188)
             } else {
                 System.arraycopy(raw, off, outBuf, outPos, 188)
@@ -522,7 +519,7 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     private fun downloadSegmentBytes(url: String, referer: String, userAgent: String): ByteArray? {
-        for (attempt in 1..3) {
+        for (attempt in 1..5) {
             try {
                 val reqBuilder = Request.Builder()
                     .url(url)
@@ -541,6 +538,11 @@ class LocalStreamProxy(private val context: Context) {
                     return bytes
                 }
             } catch (_: Exception) {
+            }
+            try {
+                Thread.sleep(350L * attempt)
+            } catch (_: InterruptedException) {
+                break
             }
         }
         return null
