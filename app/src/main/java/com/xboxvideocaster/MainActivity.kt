@@ -404,7 +404,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     val cleanTitle = pageTitle
                         .replace(Regex("(?i)\\s*[-|•]\\s*(anime-sama|french-stream|fstream|fs\\d+).*"), "")
                         .trim()
-                    val changedEp = (epNum != currentEpisodeNumber || epIdx != currentEpisodeIndex || cleanTitle != currentPageTitle)
+                    val changedEp = (epNum != currentEpisodeNumber || epIdx != currentEpisodeIndex || cleanTitle != currentPageTitle || epLabel != currentEpisodeLabel)
                     currentPageTitle = cleanTitle
                     if (epNum > 0) currentEpisodeNumber = epNum
                     currentEpisodeIndex = epIdx
@@ -413,6 +413,16 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                     if (changedEp && epIdx >= 0) {
                         updateFavoriteEpisodeIfPresent(pageUrl, epIdx, epLabel)
                         refreshAniSkipIntroForCurrentEpisode(pageUrl, cleanTitle, currentEpisodeNumber)
+                        if (activePreparedStream != null) {
+                            val displayTitle = getDisplayStreamTitle()
+                            CastForegroundService.updateNotificationState(
+                                this@MainActivity,
+                                isXboxPaused,
+                                currentPlaybackSec,
+                                title = displayTitle
+                            )
+                            saveCurrentPlaybackProgress()
+                        }
                     }
                 }
 
@@ -437,7 +447,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                                     activeStreamToKeep = current
                                 )
                                 preloadedNextPreparedStream = nextPrepared
-                                preloadedNextTitle = currentPageTitle
+                                preloadedNextTitle = getDisplayStreamTitle()
                                 runOnUiThread {
                                     updateStatus("⏭ Épisode suivant pré-chargé en mémoire ! Transition fluide à la fin...", isLoading = false)
                                 }
@@ -635,6 +645,21 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                             curEpLabel = epSelRestore.options[curEpIdx].text || ('Épisode ' + (curEpIdx + 1));
                             var mEp = curEpLabel.match(/(\d+)/);
                             curEpNum = mEp ? parseInt(mEp[1], 10) : (curEpIdx + 1);
+                        } else {
+                            var activeFsEp = document.querySelector('.elink.active, .fs-ep-btn.active, .episodes a.active, [data-ep].active');
+                            if (activeFsEp) {
+                                var epText = (activeFsEp.textContent || activeFsEp.getAttribute('data-ep') || '').trim();
+                                curEpLabel = epText;
+                                var mEpFs = epText.match(/(\d+)/);
+                                curEpNum = mEpFs ? parseInt(mEpFs[1], 10) : 1;
+                                var allEpBtns = document.querySelectorAll('.elink, .fs-ep-btn, .episodes a, [data-ep]');
+                                for (var b = 0; b < allEpBtns.length; b++) {
+                                    if (allEpBtns[b] === activeFsEp) {
+                                        curEpIdx = b;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         XboxBridge.onPageMetadataDetected(rawTitle, curEpNum, curEpIdx, curEpLabel, window.location.href);
 
@@ -791,7 +816,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         lastDetectedStreamUrl = upgradedStreamUrl
         lastDetectedReferer = referer
         runOnUiThread {
-            if (activePreparedStream == null || isNewStream) {
+            if (activePreparedStream == null) {
                 updateStatus("✅ Flux vidéo prêt ! Appuyez sur LANCER SUR LA XBOX.", isLoading = false)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this, R.color.xbox_green))
             }
@@ -1395,7 +1420,7 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 // 1. Sur Anime-Sama : résolution autonome sans dépendre de l'affichage du téléphone
-                if (pageUrl.contains("anime-sama.", ignoreCase = true) && nextIdx > 0) {
+                if (pageUrl.contains("anime-sama.", ignoreCase = true) && nextIdx >= 0) {
                     val direct = videoStreamSniffer.resolveAnimeSamaNextEpisodeStream(pageUrl, nextIdx)
                     if (direct != null && VideoStreamSniffer.isVideoStreamUrl(direct.first)) {
                         lastDetectedStreamUrl = direct.first
@@ -1408,10 +1433,9 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         )
                         preloadedNextPreparedStream = nextPrepared
                         preloadedForEpisodeIndex = nextIdx
-                        val epLabel = "Épisode ${nextIdx + 1}"
-                        currentEpisodeIndex = nextIdx
-                        currentEpisodeLabel = epLabel
-                        preloadedNextTitle = "$currentPageTitle - $epLabel"
+                        val nextEpNum = if (currentEpisodeNumber > 0) currentEpisodeNumber + 1 else nextIdx + 1
+                        val epLabel = "Épisode $nextEpNum"
+                        preloadedNextTitle = if (currentPageTitle.isNotBlank()) "$currentPageTitle • $epLabel" else epLabel
                         runOnUiThread {
                             updateStatus("⏭ $epLabel prêt en mémoire ! Enchaînement fluide à la fin...", isLoading = false)
                         }
@@ -1438,7 +1462,9 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         val ip = binding.etXboxIp.text?.toString()?.trim() ?: DEFAULT_XBOX_IP
 
         if (nextPrepared != null) {
+            val targetEpIdx = if (preloadedForEpisodeIndex >= 0) preloadedForEpisodeIndex else (currentEpisodeIndex + 1)
             preloadedNextPreparedStream = null
+            preloadedForEpisodeIndex = -1
             isPreloadingNextEpisode = false
             activePreparedStream = nextPrepared
             localStreamProxy.activeStream = nextPrepared
@@ -1447,19 +1473,40 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             CastForegroundService.currentPositionSec = 0
             CastForegroundService.isPausedState = false
 
+            // Mise à jour de l'épisode dans l'app et notification
+            currentEpisodeIndex = targetEpIdx
+            if (currentEpisodeNumber > 0) {
+                currentEpisodeNumber += 1
+                currentEpisodeLabel = "Épisode $currentEpisodeNumber"
+            } else {
+                currentEpisodeLabel = "Épisode ${targetEpIdx + 1}"
+            }
+            val streamTitle = preloadedNextTitle ?: getDisplayStreamTitle()
+            preloadedNextTitle = null
+
             runOnUiThread {
-                updateStatus("⏭ Enchaînement fluide : Épisode suivant en cours...", isLoading = false)
+                updateStatus("⏭ Enchaînement fluide : $streamTitle en cours...", isLoading = false)
                 updateTimerDisplay()
                 binding.btnPlayPause.text = "⏸ PAUSE"
-                Toast.makeText(this@MainActivity, "⏭ Épisode suivant lancé !", Toast.LENGTH_SHORT).show()
+                saveCurrentPlaybackProgress()
+                // 1. Mettre à jour immédiatement la barre de notification du téléphone
+                CastForegroundService.updateNotificationState(
+                    this@MainActivity,
+                    isPaused = false,
+                    positionSec = 0,
+                    title = streamTitle
+                )
+                // 2. Mettre à jour la page Web (menu déroulant Anime-Sama / bouton French Stream)
+                applyNextEpisodeToWebView(targetEpIdx)
+                Toast.makeText(this@MainActivity, "⏭ $streamTitle lancé !", Toast.LENGTH_SHORT).show()
             }
 
             lifecycleScope.launch {
                 val proxiedUrl = localStreamProxy.buildPlaybackUrl(nextPrepared, startSeconds = 0)
-                val streamTitle = preloadedNextTitle ?: getDisplayStreamTitle()
 
-                // Mettre à jour AniSkip pour le nouvel épisode
+                // Mettre à jour AniSkip et favoris pour le nouvel épisode
                 val pageUrl = withContext(Dispatchers.Main) { binding.webViewBrowser.url ?: "" }
+                updateFavoriteEpisodeIfPresent(pageUrl, currentEpisodeIndex, currentEpisodeLabel)
                 refreshAniSkipIntroForCurrentEpisode(pageUrl, currentPageTitle, currentEpisodeNumber)
 
                 dlnaController.playMediaOnXbox(
@@ -1473,6 +1520,65 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
         } else {
             triggerAutoNextEpisode()
         }
+    }
+
+    /**
+     * Met à jour visuellement le menu déroulant de l'épisode dans la page web (Anime-Sama ou French Stream)
+     * tout en gardant l'iframe muette pour ne pas jouer de son parasite sur le téléphone en arrière-plan.
+     */
+    private fun applyNextEpisodeToWebView(targetEpIdx: Int) {
+        val jsUpdate = """
+            (function() {
+                try {
+                    // 1. Anime-Sama : mettre à jour le sélecteur d'épisode et l'affichage sans son parasite
+                    var epSel = document.getElementById('selectEpisodes');
+                    if (epSel && epSel.options.length > $targetEpIdx) {
+                        epSel.selectedIndex = $targetEpIdx;
+                        window.__xboxCastBlanked = true;
+                        var pFrame = document.getElementById('playerDF');
+                        if (pFrame) {
+                            pFrame.src = 'about:blank';
+                        }
+                        if (typeof selectEpisode === 'function') {
+                            try { selectEpisode(); } catch(e) {}
+                            if (pFrame) pFrame.src = 'about:blank';
+                        } else {
+                            epSel.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                        setTimeout(function() {
+                            var pf = document.getElementById('playerDF');
+                            if (pf) pf.src = 'about:blank';
+                            window.__xboxCastBlanked = true;
+                        }, 250);
+
+                        var opt = epSel.options[$targetEpIdx];
+                        var optText = opt ? (opt.text || opt.innerText || '').trim() : '';
+                        var mNum = optText.match(/(\d+)/);
+                        var epNum = mNum ? parseInt(mNum[1], 10) : ($targetEpIdx + 1);
+                        var rawTitle = document.title || '';
+                        var hTitle = document.querySelector('#titreOeuvre, h1');
+                        if (hTitle && hTitle.textContent && hTitle.textContent.trim().length > 1) {
+                            rawTitle = hTitle.textContent.trim();
+                        }
+                        XboxBridge.onPageMetadataDetected(rawTitle, epNum, $targetEpIdx, optText, window.location.href);
+                        return;
+                    }
+
+                    // 2. French Stream : cliquer sur le bouton suivant
+                    var activeEp = document.querySelector('.elink.active, .fs-ep-btn.active, .episodes a.active, [data-ep].active');
+                    if (activeEp && activeEp.nextElementSibling) {
+                        window.__xboxCastBlanked = true;
+                        activeEp.nextElementSibling.click();
+                        setTimeout(function() {
+                            var pf = document.getElementById('player-frame');
+                            if (pf) pf.src = 'about:blank';
+                            window.__xboxCastBlanked = true;
+                        }, 250);
+                    }
+                } catch(e) {}
+            })();
+        """.trimIndent()
+        binding.webViewBrowser.evaluateJavascript(jsUpdate, null)
     }
 
     private fun triggerAutoNextEpisodeJs() {

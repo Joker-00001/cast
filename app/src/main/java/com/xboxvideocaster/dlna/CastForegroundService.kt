@@ -77,6 +77,9 @@ class CastForegroundService : Service() {
         @Volatile
         var remoteActionListener: RemoteActionListener? = null
 
+        @Volatile
+        var serviceInstance: CastForegroundService? = null
+
         fun startService(
             context: Context,
             deviceIp: String = "192.168.1.52",
@@ -103,7 +106,10 @@ class CastForegroundService : Service() {
             if (!title.isNullOrBlank()) {
                 currentTitleText = title
             }
-            if (isCastActive) {
+            val inst = serviceInstance
+            if (inst != null && isCastActive) {
+                inst.refreshNotification()
+            } else if (isCastActive) {
                 val intent = Intent(context, CastForegroundService::class.java)
                 try {
                     context.startService(intent)
@@ -122,6 +128,7 @@ class CastForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        serviceInstance = this
         createNotificationChannel()
         acquireLocks()
         startSilentAudioAndWifiKeepAlive()
@@ -452,6 +459,9 @@ class CastForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        if (serviceInstance === this) {
+            serviceInstance = null
+        }
         stopSilentAudioAndWifiKeepAlive()
         releaseLocks()
         super.onDestroy()
