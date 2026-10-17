@@ -22,6 +22,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
@@ -72,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private var currentPlaybackSec: Int = 0
     private var isXboxPaused: Boolean = false
     private var isSeekingNow: Boolean = false
+    private var isUserDraggingSeekBar: Boolean = false
     private var positionTrackerJob: Job? = null
 
     // Option : Épisode suivant automatique à la fin
@@ -136,6 +138,7 @@ class MainActivity : AppCompatActivity() {
         val existingStream = localStreamProxy.activeStream
         if (existingStream != null && CastForegroundService.isCastActive) {
             activePreparedStream = existingStream
+            window.addFlags( android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             binding.layoutRemoteControls.visibility = View.VISIBLE
             binding.tvTimer.visibility = View.VISIBLE
             updateStatus("Diffusion active en cours sur la TV / Xbox 🎮", isLoading = false)
@@ -533,8 +536,21 @@ class MainActivity : AppCompatActivity() {
         ) {
             return
         }
-        val isNewStream = (streamUrl != current)
-        lastDetectedStreamUrl = streamUrl
+        // Ne jamais écraser un master.m3u8 déjà détecté par une sous-playlist (index-v1-a1.m3u8) basse qualité (_l) !
+        if (current != null &&
+            current.contains("master.m3u8", ignoreCase = true) &&
+            streamUrl.contains("index-", ignoreCase = true)
+        ) {
+            return
+        }
+        // Si une sous-playlist basse qualité (_l/index-) est interceptée, forcer la version HD Stéréo (_n/index-)
+        val upgradedStreamUrl = if (streamUrl.contains("_l/index-", ignoreCase = true)) {
+            streamUrl.replace("_l/index-", "_n/index-", ignoreCase = true)
+        } else {
+            streamUrl
+        }
+        val isNewStream = (upgradedStreamUrl != current)
+        lastDetectedStreamUrl = upgradedStreamUrl
         lastDetectedReferer = referer
         runOnUiThread {
             if (activePreparedStream == null || isNewStream) {
@@ -671,6 +687,25 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // --- Télécommande : Curseur manuel (SeekBar) pour avancer/reculer librement ---
+        binding.seekBarProgress.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    binding.tvCurrentTime.text = dlnaController.formatSecondsToHms(progress)
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                isUserDraggingSeekBar = true
+            }
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                isUserDraggingSeekBar = false
+                val target = seekBar?.progress ?: return
+                seekToSeconds(target)
+            }
+        })
+
         // --- Télécommande : Reculer de 30s ---
         binding.btnRewind30.setOnClickListener {
             jumpBySeconds(-30)
@@ -688,6 +723,7 @@ class MainActivity : AppCompatActivity() {
                 stopPositionTracker()
                 activePreparedStream = null
                 localStreamProxy.activeStream = null
+                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 CastForegroundService.stopService(this@MainActivity)
                 restoreBlankedWebViewIframe()
                 lifecycleScope.launch {
@@ -909,16 +945,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Saute exactement de +30s ou -30s dans l'épisode/film en cours sur la Xbox
-     * (sans jamais doubler le compteur de temps ni changer d'épisode).
+     * Saute exactement de +30s ou -30s dans l'épisode/film en cours sur la Xbox / TV.
      */
     private fun jumpBySeconds(deltaSec: Int) {
+        seekToSeconds(currentPlaybackSec + deltaSec)
+    }
+
+    /**
+     * Saute directement à la seconde choisie (via le curseur SeekBar ou les boutons +/- 30s).
+     */
+    private fun seekToSeconds(rawTargetSec: Int) {
         if (isSeekingNow) return
         val ip = binding.etXboxIp.text?.toString()?.trim() ?: return
         val prepared = activePreparedStream ?: return
 
         val maxSeekSec = (prepared.totalDurationSec - 5).coerceAtLeast(0)
-        val targetSec = (currentPlaybackSec + deltaSec).coerceIn(0, maxSeekSec)
+        val targetSec = rawTargetSec.coerceIn(0, maxSeekSec)
 
         isSeekingNow = true
         updateStatus("Saut à ${dlnaController.formatSecondsToHms(targetSec)}...", isLoading = true)
@@ -1001,6 +1043,15 @@ class MainActivity : AppCompatActivity() {
         val currentStr = dlnaController.formatSecondsToHms(currentPlaybackSec)
         val totalStr = dlnaController.formatSecondsToHms(prepared.totalDurationSec)
         binding.tvTimer.text = "$currentStr / $totalStr"
+        binding.tvTotalTime.text = totalStr
+        val safeMax = prepared.totalDurationSec.coerceAtLeast(1)
+        if (binding.seekBarProgress.max != safeMax) {
+            binding.seekBarProgress.max = safeMax
+        }
+        if (!isUserDraggingSeekBar) {
+            binding.tvCurrentTime.text = currentStr
+            binding.seekBarProgress.progress = currentPlaybackSec.coerceIn(0, safeMax)
+        }
     }
 
     private fun setupBackNavigation() {
@@ -1150,6 +1201,7 @@ class MainActivity : AppCompatActivity() {
 
             castResult.onSuccess {
                 val devName = prefs.getString(KEY_DEVICE_NAME, null) ?: "Xbox / TV ($xboxIp)"
+                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 CastForegroundService.startService(this@MainActivity, xboxIp, devName)
                 updateStatus(getString(R.string.status_playing), isLoading = false)
                 binding.tvStatus.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.xbox_green))

@@ -86,6 +86,9 @@ class CastForegroundService : Service() {
         intent?.getStringExtra(EXTRA_DEVICE_IP)?.let { currentDeviceIp = it }
         intent?.getStringExtra(EXTRA_DEVICE_NAME)?.let { currentDeviceName = it }
 
+        acquireLocks()
+        LocalStreamProxy.getInstance(applicationContext).start()
+
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -138,6 +141,7 @@ class CastForegroundService : Service() {
         // Ne pas arrêter le service quand l'utilisateur ferme l'application depuis le multitâche :
         // la notification reste dans la barre de notif et la vidéo continue sur la TV / Xbox !
         if (isCastActive) {
+            acquireLocks()
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
             nm?.notify(NOTIFICATION_ID, buildNotification())
         }
@@ -146,22 +150,24 @@ class CastForegroundService : Service() {
 
     private fun acquireLocks() {
         try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "XboxVideoCaster::ProxyWakeLock").apply {
-                setReferenceCounted(false)
-                acquire(6 * 60 * 60 * 1000L) // Max 6h
+            if (wakeLock?.isHeld != true) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "XboxVideoCaster::ProxyWakeLock").apply {
+                    setReferenceCounted(false)
+                    acquire(6 * 60 * 60 * 1000L) // Max 6h
+                }
             }
 
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val lockType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-            } else {
+            if (wifiLock?.isHeld != true) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                // IMPORTANT : WIFI_MODE_FULL_HIGH_PERF reste actif même quand l'écran s'éteint
+                // (contrairement à WIFI_MODE_FULL_LOW_LATENCY qu'Android désactive dès que l'écran s'éteint !)
                 @Suppress("DEPRECATION")
-                WifiManager.WIFI_MODE_FULL_HIGH_PERF
-            }
-            wifiLock = wm.createWifiLock(lockType, "XboxVideoCaster::ProxyWifiLock").apply {
-                setReferenceCounted(false)
-                acquire()
+                val lockType = WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                wifiLock = wm.createWifiLock(lockType, "XboxVideoCaster::ProxyWifiLock").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
             }
         } catch (_: Exception) {
         }

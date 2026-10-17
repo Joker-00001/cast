@@ -70,19 +70,21 @@ class LocalStreamProxy(private val context: Context) {
         val userAgent: String,
         val isHls: Boolean,
         val segments: List<SegmentItem>,
-        val totalDurationSec: Int
+        val totalDurationSec: Int,
+        @Volatile var lastServedSegmentIdx: Int = 0
     )
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .followRedirects(true)
-        .connectionPool(ConnectionPool(12, 5, TimeUnit.MINUTES))
+        .connectionPool(ConnectionPool(8, 5, TimeUnit.MINUTES))
         .build()
 
     private val streamRegistry = ConcurrentHashMap<String, PreparedStream>()
     private val segmentFutures = ConcurrentHashMap<String, Future<ByteArray?>>()
-    private val prefetchPool = Executors.newFixedThreadPool(6)
+    // 2 threads max pour ne JAMAIS saturer l'antenne Wi-Fi du téléphone pendant qu'il envoie le flux à la Smart TV !
+    private val prefetchPool = Executors.newFixedThreadPool(2)
 
     fun start() {
         if (isRunning) return
@@ -128,8 +130,8 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
-     * Analyse la vidéo, prépare les segments, la durée totale et pré-charge les 3 premiers segments
-     * en RAM avant d'envoyer l'ordre de lecture à la Xbox.
+     * Analyse la vidéo, prépare les segments, la durée totale et pré-charge les 2 premiers segments
+     * en RAM avant d'envoyer l'ordre de lecture à la TV / Xbox.
      */
     fun prepareStream(realStreamUrl: String, referer: String?, userAgent: String?): PreparedStream {
         start()
@@ -162,10 +164,10 @@ class LocalStreamProxy(private val context: Context) {
         )
         streamRegistry[id] = prepared
 
-        // Pré-charger les 8 premiers segments en parallèle (6 threads) et attendre 3 segments (30s) en RAM !
+        // Pré-charger les 3 premiers segments sans saturer le Wi-Fi et attendre les 2 premiers en RAM
         if (segments.isNotEmpty()) {
-            triggerPrefetch(prepared, 0, 8)
-            val prebufferCount = min(3, segments.size)
+            triggerPrefetch(prepared, 0, 3)
+            val prebufferCount = min(2, segments.size)
             for (i in 0 until prebufferCount) {
                 try {
                     ensureSegmentDownload(segments[i].url, prepared.referer, prepared.userAgent)
@@ -179,12 +181,13 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     /**
-     * Pré-charge la zone cible avant un saut (+30s / -30s)
+     * Pré-charge la zone cible avant un saut (+30s / -30s / curseur)
      */
     fun warmupForSeek(prepared: PreparedStream, targetSec: Int): Int {
         if (!prepared.isHls || prepared.segments.isEmpty()) return targetSec
         val startIndex = prepared.segments.indexOfLast { it.startTimeSec <= targetSec }.coerceAtLeast(0)
-        triggerPrefetch(prepared, startIndex, 5)
+        prepared.lastServedSegmentIdx = startIndex
+        triggerPrefetch(prepared, startIndex, 3)
         try {
             ensureSegmentDownload(
                 prepared.segments[startIndex].url,
@@ -201,7 +204,7 @@ class LocalStreamProxy(private val context: Context) {
         return when {
             lower.contains("fsvid") -> "https://fsvid.lol/"
             lower.contains("vidzy") -> "https://vidzy.cc/"
-            lower.contains("vmnow") || lower.contains("ansembed") -> "https://ansembed.net/"
+            lower.contains("vmnow") || lower.contains("vmpx") || lower.contains("ansembed") -> "https://ansembed.net/"
             lower.contains("vidmoly") -> "https://vidmoly.to/"
             lower.contains("sibnet") -> "https://video.sibnet.ru/"
             lower.contains("sendvid") -> "https://sendvid.com/"
@@ -222,10 +225,17 @@ class LocalStreamProxy(private val context: Context) {
 
     private fun parseHlsSegments(masterOrMediaUrl: String, referer: String, userAgent: String): List<SegmentItem> {
         return try {
-            val firstM3u8 = fetchText(masterOrMediaUrl, referer, userAgent) ?: return emptyList()
-            val baseUri = URL(masterOrMediaUrl)
+            val normalizedUrl = if (masterOrMediaUrl.contains("_l/index-", ignoreCase = true)) {
+                masterOrMediaUrl.replace("_l/index-", "_n/index-", ignoreCase = true)
+            } else {
+                masterOrMediaUrl
+            }
+            val firstM3u8 = fetchText(normalizedUrl, referer, userAgent)
+                ?: fetchText(masterOrMediaUrl, referer, userAgent)
+                ?: return emptyList()
+            val baseUri = URL(normalizedUrl)
 
-            var mediaPlaylistUrl = masterOrMediaUrl
+            var mediaPlaylistUrl = normalizedUrl
             var mediaPlaylistText = firstM3u8
 
             if (firstM3u8.contains("#EXT-X-STREAM-INF")) {
@@ -271,8 +281,11 @@ class LocalStreamProxy(private val context: Context) {
     private fun handleClient(socket: Socket) {
         socket.use { client ->
             try {
-                client.soTimeout = 30000
-                client.sendBufferSize = 524288 // 512 KB socket buffer
+                // Timeout court uniquement pour lire les headers HTTP, puis 0 (infini) pendant le streaming
+                // afin que la connexion ne coupe JAMAIS quand le buffer de la Smart TV est plein !
+                client.soTimeout = 10000
+                client.keepAlive = true
+                client.sendBufferSize = 262144 // 256 KB socket buffer
                 client.tcpNoDelay = true
 
                 val input = client.getInputStream().bufferedReader()
@@ -290,6 +303,9 @@ class LocalStreamProxy(private val context: Context) {
                     }
                 }
 
+                // Désactiver le timeout une fois la requête lue pour supporter les pauses / buffers TV
+                client.soTimeout = 0
+
                 val token = path.substringAfter("/xbox/")
                     .substringBefore(".ts")
                     .substringBefore(".mp4")
@@ -302,7 +318,7 @@ class LocalStreamProxy(private val context: Context) {
                 val out = client.getOutputStream()
 
                 if (prepared.isHls) {
-                    serveBufferedHlsStream(method, prepared, startSec, out)
+                    serveBufferedHlsStream(method, prepared, startSec, rangeHeader, out)
                 } else {
                     serveDirectMp4(method, prepared, rangeHeader, out)
                 }
@@ -314,22 +330,25 @@ class LocalStreamProxy(private val context: Context) {
 
     /**
      * Envoie les segments MPEG-TS en continu avec :
-     * - DLNA.ORG_OP=00 (flux continu pur : empêche la Xbox de couper/sonder le flux toutes les 10s !)
+     * - Régulation intelligente du débit Wi-Fi (évite que le téléchargement en parallèle ne sature l'antenne Wi-Fi
+     *   du téléphone et ne provoque "Signal faible" sur la Smart TV !)
+     * - DLNA.ORG_OP=00 sans DLNA.ORG_PN strict (accepte l'audio AAC 32 kHz d'Anime-Sama sans reset sur Xbox)
      * - Filtrage des paquets illégaux (AFC=3, alen=183) et continuité stricte des compteurs CC MPEG-TS !
      */
     private fun serveBufferedHlsStream(
         method: String,
         prepared: PreparedStream,
         startSec: Int,
+        rangeHeader: String?,
         out: OutputStream
     ) {
         val headers = buildString {
             append("HTTP/1.1 200 OK\r\n")
             append("Content-Type: video/vnd.dlna.mpeg-tts\r\n")
             append("transferMode.dlna.org: Streaming\r\n")
-            append("contentFeatures.dlna.org: DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5;DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
+            append("contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
-            append("Connection: close\r\n\r\n")
+            append("Connection: keep-alive\r\n\r\n")
         }
         out.write(headers.toByteArray())
         out.flush()
@@ -339,29 +358,48 @@ class LocalStreamProxy(private val context: Context) {
         val segments = prepared.segments
         if (segments.isEmpty()) return
 
-        val startIndex = segments.indexOfLast { it.startTimeSec <= startSec }.coerceAtLeast(0)
+        var startIndex = segments.indexOfLast { it.startTimeSec <= startSec }.coerceAtLeast(0)
+        // Si la Smart TV tente de se reconnecter en cours de lecture avec un header Range non nul,
+        // reprendre directement au segment en cours au lieu de repartir à 0:00
+        if (rangeHeader != null && !rangeHeader.startsWith("bytes=0-") && prepared.lastServedSegmentIdx > startIndex) {
+            startIndex = prepared.lastServedSegmentIdx
+        }
+
         // Table des Continuity Counters (CC 0..15) par PID pour un flux MPEG-TS 100% continu sans coupure
         val pidContinuityMap = HashMap<Int, Int>()
 
         for (i in startIndex until segments.size) {
-            // Pré-charger les 8 segments suivants (80 secondes d'avance en RAM !)
-            triggerPrefetch(prepared, i + 1, 8)
+            prepared.lastServedSegmentIdx = i
 
-            // Conserver les 4 derniers segments en RAM (pour les doubles requêtes Xbox et le recul -30s)
-            if (i - 4 >= 0) {
-                segmentFutures.remove(segments[i - 4].url)
+            // Pré-charger uniquement 3 segments d'avance (sur 2 threads) pour garder le Wi-Fi fluide vers la TV
+            // et ne jamais dépasser ~30 Mo de RAM sur le téléphone
+            triggerPrefetch(prepared, i + 1, 3)
+
+            // Libérer la RAM au fur et à mesure (garder les 2 derniers segments)
+            if (i - 2 >= 0) {
+                segmentFutures.remove(segments[i - 2].url)
             }
 
             val segUrl = segments[i].url
-            val rawBytes = try {
+            var rawBytes = try {
                 ensureSegmentDownload(segUrl, prepared.referer, prepared.userAgent)
                     .get(25, TimeUnit.SECONDS)
             } catch (_: Exception) {
                 null
-            } ?: continue
+            }
+            if (rawBytes == null) {
+                segmentFutures.remove(segUrl)
+                rawBytes = downloadSegmentBytes(segUrl, prepared.referer, prepared.userAgent) ?: continue
+            }
 
             val cleanBytes = sanitizeTsSegment(rawBytes, pidContinuityMap, isFirstSegment = (i == startIndex))
-            out.write(cleanBytes)
+            var offset = 0
+            val chunkSize = 32768 // 32 KB chunks pour un flux Wi-Fi régulier sans pic de latence
+            while (offset < cleanBytes.size) {
+                val len = min(chunkSize, cleanBytes.size - offset)
+                out.write(cleanBytes, offset, len)
+                offset += len
+            }
             out.flush()
         }
     }
@@ -484,40 +522,56 @@ class LocalStreamProxy(private val context: Context) {
     }
 
     private fun downloadSegmentBytes(url: String, referer: String, userAgent: String): ByteArray? {
-        return try {
-            val reqBuilder = Request.Builder()
-                .url(url)
-                .header("User-Agent", userAgent)
-                .header("Referer", referer)
+        for (attempt in 1..3) {
             try {
-                val refUri = URL(referer)
-                reqBuilder.header("Origin", "${refUri.protocol}://${refUri.host}")
+                val reqBuilder = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", userAgent)
+                    .header("Referer", referer)
+                try {
+                    val refUri = URL(referer)
+                    reqBuilder.header("Origin", "${refUri.protocol}://${refUri.host}")
+                } catch (_: Exception) {
+                }
+
+                val bytes = httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (!resp.isSuccessful) null else resp.body?.bytes()
+                }
+                if (bytes != null && bytes.isNotEmpty()) {
+                    return bytes
+                }
             } catch (_: Exception) {
             }
-
-            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                resp.body?.bytes()
-            }
-        } catch (_: Exception) {
-            null
         }
+        return null
     }
 
     private fun pickBestVariantUrl(masterText: String, baseUri: URL): String? {
         val lines = masterText.lines()
+        var bestUrl: String? = null
+        var bestBandwidth = -1L
+
         for (i in lines.indices) {
             val line = lines[i].trim()
             if (line.startsWith("#EXT-X-STREAM-INF")) {
+                val bw = line.substringAfter("BANDWIDTH=", "")
+                    .substringBefore(",")
+                    .trim()
+                    .toLongOrNull() ?: 0L
                 for (j in (i + 1) until lines.size) {
                     val next = lines[j].trim()
                     if (next.isNotEmpty() && !next.startsWith("#")) {
-                        return resolveUrl(baseUri, next)
+                        val candidate = resolveUrl(baseUri, next)
+                        if (bw > bestBandwidth || bestUrl == null) {
+                            bestBandwidth = bw
+                            bestUrl = candidate
+                        }
+                        break
                     }
                 }
             }
         }
-        return null
+        return bestUrl
     }
 
     private fun serveDirectMp4(
