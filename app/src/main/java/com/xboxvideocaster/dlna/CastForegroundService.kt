@@ -364,16 +364,6 @@ class CastForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val forwardIntent = Intent(this, CastForegroundService::class.java).apply {
-            action = ACTION_FORWARD_30
-        }
-        val pendingForward = PendingIntent.getService(
-            this,
-            4,
-            forwardIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         val closeAppIntent = Intent(this, CastForegroundService::class.java).apply {
             action = ACTION_CLOSE_APP
         }
@@ -388,7 +378,6 @@ class CastForegroundService : Service() {
         val playPauseIcon = if (isPausedState) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause
         val statusPrefix = if (isPausedState) "⏸ En pause" else "▶ En lecture"
 
-        // 3 boutons d'action maximum : Android les affiche TOUS LES 3 en permanence dans la barre de notification !
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("📺 $currentDeviceName • $currentTitleText")
             .setContentText("$statusPrefix • Touchez pour ouvrir l'application")
@@ -400,7 +389,6 @@ class CastForegroundService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .addAction(playPauseIcon, playPauseLabel, pendingToggle)
-            .addAction(android.R.drawable.ic_media_ff, "+30s ⏩", pendingForward)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "❌ Fermer l'app", pendingCloseApp)
             .build()
     }

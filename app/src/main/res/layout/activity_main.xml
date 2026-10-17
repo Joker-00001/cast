@@ -362,25 +362,38 @@
 
     </LinearLayout>
 
-    <!-- Bottom Dynamic Status, Remote Control & Cast Bar -->
+    <!-- Bottom Dynamic Status, Remote Control & Cast Bar (Réductible par slide / bouton) -->
     <LinearLayout
         android:id="@+id/bottomCastBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:animateLayoutChanges="true"
         android:background="@color/surface_card"
         android:elevation="12dp"
         android:gravity="center_vertical"
         android:orientation="vertical"
-        android:padding="10dp"
+        android:paddingHorizontal="10dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="10dp"
         app:layout_constraintBottom_toBottomOf="parent">
 
-        <!-- Status & Timer Row -->
+        <!-- Petite barre poignée visuelle de slide -->
+        <View
+            android:id="@+id/dragHandlePill"
+            android:layout_width="38dp"
+            android:layout_height="4dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="5dp"
+            android:background="#475569" />
+
+        <!-- Status, Timer & Bouton Réduire/Ouvrir Row -->
         <LinearLayout
+            android:id="@+id/layoutStatusHeader"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingBottom="6dp">
+            android:paddingBottom="4dp">
 
             <ProgressBar
                 android:id="@+id/progressBar"
@@ -405,267 +418,233 @@
                 android:id="@+id/tvTimer"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
+                android:layout_marginStart="6dp"
+                android:layout_marginEnd="6dp"
                 android:text="0:00:00"
                 android:textColor="@color/white"
                 android:textSize="12sp"
                 android:textStyle="bold"
                 android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnToggleBottomPanel"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="28dp"
+                android:backgroundTint="#2B303B"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="8dp"
+                android:text="▼ Réduire"
+                android:textColor="#CBD5E1"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                app:cornerRadius="7dp" />
         </LinearLayout>
 
-        <!-- Télécommande TV / Xbox avec Curseur (SeekBar) + Boutons (-30s / Pause / +30s / Stop) + Volume & Skip Intro -->
+        <!-- Partie réductible (slide vers le bas pour masquer, slide vers le haut pour afficher) -->
         <LinearLayout
-            android:id="@+id/layoutRemoteControls"
+            android:id="@+id/layoutCollapsibleControls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="6dp"
-            android:orientation="vertical"
-            android:visibility="gone">
+            android:orientation="vertical">
 
-            <!-- Barre de progression (Slider manuel) -->
+            <!-- Télécommande TV / Xbox avec Curseur (SeekBar) + Boutons (-30s / Pause / +30s / Stop) -->
+            <LinearLayout
+                android:id="@+id/layoutRemoteControls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <!-- Barre de progression (Slider manuel) -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/tvCurrentTime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0:00:00"
+                        android:textColor="@color/white"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <SeekBar
+                        android:id="@+id/seekBarProgress"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginHorizontal="6dp"
+                        android:layout_weight="1"
+                        android:max="1440"
+                        android:progress="0"
+                        android:progressBackgroundTint="#3F444E"
+                        android:progressTint="@color/xbox_green"
+                        android:thumbTint="@color/xbox_green" />
+
+                    <TextView
+                        android:id="@+id/tvTotalTime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="0:24:00"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Ligne Télécommande : -30s / Pause / +30s / Stop -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnRewind30"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="#2B303B"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="⏪ -30s"
+                        android:textColor="@color/white"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnPlayPause"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1.2"
+                        android:backgroundTint="#1E293B"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="⏸ PAUSE"
+                        android:textColor="#38BDF8"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnForward30"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="#2B303B"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="+30s ⏩"
+                        android:textColor="@color/white"
+                        android:textSize="12sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnStop"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:backgroundTint="#3B1818"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:minWidth="50dp"
+                        android:paddingHorizontal="10dp"
+                        android:text="⏹"
+                        android:textColor="@color/accent_red"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        app:cornerRadius="10dp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Ligne unique d'options : Ép. Suivant Auto + Skip Intro + Plein Écran Tél -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="4dp"
+                android:layout_marginBottom="6dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <TextView
-                    android:id="@+id/tvCurrentTime"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0:00:00"
-                    android:textColor="@color/white"
-                    android:textSize="11sp"
-                    android:textStyle="bold" />
-
-                <SeekBar
-                    android:id="@+id/seekBarProgress"
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAutoNext"
+                    style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginHorizontal="6dp"
-                    android:layout_weight="1"
-                    android:max="1440"
-                    android:progress="0"
-                    android:progressBackgroundTint="#3F444E"
-                    android:progressTint="@color/xbox_green"
-                    android:thumbTint="@color/xbox_green" />
-
-                <TextView
-                    android:id="@+id/tvTotalTime"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0:24:00"
+                    android:layout_height="38dp"
+                    android:layout_marginEnd="5dp"
+                    android:layout_weight="1.05"
+                    android:backgroundTint="#2B303B"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingHorizontal="4dp"
+                    android:text="⏭ Auto: OFF"
                     android:textColor="@color/text_secondary"
-                    android:textSize="11sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <!-- Ligne 1 Télécommande : -30s / Pause / +30s / Stop -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:orientation="horizontal">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnRewind30"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_marginEnd="6dp"
-                    android:layout_weight="1"
-                    android:backgroundTint="#2B303B"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="⏪ -30s"
-                    android:textColor="@color/white"
-                    android:textSize="12sp"
+                    android:textSize="10.5sp"
                     android:textStyle="bold"
-                    app:cornerRadius="10dp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnPlayPause"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_marginEnd="6dp"
-                    android:layout_weight="1.2"
-                    android:backgroundTint="#1E293B"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="⏸ PAUSE"
-                    android:textColor="#38BDF8"
-                    android:textSize="12sp"
-                    android:textStyle="bold"
-                    app:cornerRadius="10dp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnForward30"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="0dp"
-                    android:layout_height="40dp"
-                    android:layout_marginEnd="6dp"
-                    android:layout_weight="1"
-                    android:backgroundTint="#2B303B"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="+30s ⏩"
-                    android:textColor="@color/white"
-                    android:textSize="12sp"
-                    android:textStyle="bold"
-                    app:cornerRadius="10dp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnStop"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="40dp"
-                    android:backgroundTint="#3B1818"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:minWidth="50dp"
-                    android:paddingHorizontal="10dp"
-                    android:text="⏹"
-                    android:textColor="@color/accent_red"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    app:cornerRadius="10dp" />
-            </LinearLayout>
-
-            <!-- Ligne 2 Télécommande : Volume TV (Vol - / Mute / Vol +) + Skip Intro Précis (AniSkip) -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="5dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnVolDown"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="0dp"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="5dp"
-                    android:layout_weight="0.8"
-                    android:backgroundTint="#22262F"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="🔉 Vol -"
-                    android:textColor="#CBD5E1"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    app:cornerRadius="8dp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnVolMute"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="0dp"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="5dp"
-                    android:layout_weight="0.75"
-                    android:backgroundTint="#22262F"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="🔇 Muet"
-                    android:textColor="#CBD5E1"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    app:cornerRadius="8dp" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnVolUp"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="0dp"
-                    android:layout_height="36dp"
-                    android:layout_marginEnd="6dp"
-                    android:layout_weight="0.8"
-                    android:backgroundTint="#22262F"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:padding="0dp"
-                    android:text="🔊 Vol +"
-                    android:textColor="#CBD5E1"
-                    android:textSize="11sp"
-                    android:textStyle="bold"
-                    app:cornerRadius="8dp" />
+                    app:cornerRadius="9dp" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnSkipIntro"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="0dp"
-                    android:layout_height="36dp"
-                    android:layout_weight="1.35"
+                    android:layout_height="38dp"
+                    android:layout_marginEnd="5dp"
+                    android:layout_weight="1.05"
                     android:backgroundTint="#2E1065"
                     android:insetTop="0dp"
                     android:insetBottom="0dp"
-                    android:paddingHorizontal="6dp"
+                    android:paddingHorizontal="4dp"
                     android:text="⏭ Skip Intro"
                     android:textColor="#DDD6FE"
-                    android:textSize="11sp"
+                    android:textSize="10.5sp"
                     android:textStyle="bold"
-                    app:cornerRadius="8dp" />
+                    app:cornerRadius="9dp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnPhoneFullscreen"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="0dp"
+                    android:layout_height="38dp"
+                    android:layout_weight="1"
+                    android:backgroundTint="#1E293B"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingHorizontal="4dp"
+                    android:text="⛶ Plein écran"
+                    android:textColor="#38BDF8"
+                    android:textSize="10.5sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="9dp" />
             </LinearLayout>
-        </LinearLayout>
 
-        <!-- Barre d'options : Ép. Suivant Auto (ON/OFF) + Plein Écran Paysage Téléphone -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="6dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
+            <!-- Bouton principal de lancement -->
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnAutoNext"
-                style="@style/Widget.Material3.Button.TonalButton"
-                android:layout_width="0dp"
-                android:layout_height="38dp"
-                android:layout_marginEnd="6dp"
-                android:layout_weight="1.15"
-                android:backgroundTint="#2B303B"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:paddingHorizontal="8dp"
-                android:text="⏭ Ép. Suivant Auto: OFF"
-                android:textColor="@color/text_secondary"
-                android:textSize="11sp"
+                android:id="@+id/btnCast"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:backgroundTint="@color/xbox_green"
+                android:text="📺 LANCER SUR LA XBOX / TV"
+                android:textColor="@color/white"
+                android:textSize="14sp"
                 android:textStyle="bold"
-                app:cornerRadius="9dp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnPhoneFullscreen"
-                style="@style/Widget.Material3.Button.TonalButton"
-                android:layout_width="0dp"
-                android:layout_height="38dp"
-                android:layout_weight="0.85"
-                android:backgroundTint="#1E293B"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:paddingHorizontal="8dp"
-                android:text="⛶ Plein écran Tél"
-                android:textColor="#38BDF8"
-                android:textSize="11sp"
-                android:textStyle="bold"
-                app:cornerRadius="9dp" />
+                app:cornerRadius="12dp" />
         </LinearLayout>
-
-        <!-- Bouton principal de lancement -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnCast"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:backgroundTint="@color/xbox_green"
-            android:text="📺 LANCER SUR LA XBOX / TV"
-            android:textColor="@color/white"
-            android:textSize="14sp"
-            android:textStyle="bold"
-            app:cornerRadius="12dp" />
     </LinearLayout>
 
     <!-- Conteneur Plein Écran Paysage natif HTML5 Video -->

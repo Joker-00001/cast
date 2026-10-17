@@ -44,9 +44,8 @@ class AniSkipClient(
 
             val malId = resolveMalId(cleanQuery) ?: return@withContext null
 
-            val lengthParam = if (episodeDurationSec in 300..7200) episodeDurationSec else 0
             val url = "https://api.aniskip.com/v2/skip-times/$malId/$episodeNumber" +
-                "?types[]=op&types[]=mixed-op&episodeLength=$lengthParam"
+                "?types[]=op&types[]=mixed-op&episodeLength=0"
 
             val req = Request.Builder()
                 .url(url)

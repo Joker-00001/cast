@@ -98,9 +98,8 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
     @Volatile
     private var currentIntroWindow: AniSkipClient.IntroWindow? = null
 
-    // État du Volume TV / Xbox
-    private var lastKnownTvVolume: Int = 25
-    private var isTvMuted: Boolean = false
+    // État d'ouverture/réduction du panneau de commandes du bas
+    private var isBottomPanelCollapsed: Boolean = false
 
     // État de la lecture en cours sur la Xbox / TV
     private var activePreparedStream: LocalStreamProxy.PreparedStream? = null
@@ -342,11 +341,11 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
 
     private fun updateAutoNextButtonUi() {
         if (isAutoNextEnabled) {
-            binding.btnAutoNext.text = "⏭ Ép. Suivant Auto: ON ✅"
+            binding.btnAutoNext.text = "⏭ Auto: ON ✅"
             binding.btnAutoNext.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#14532D"))
             binding.btnAutoNext.setTextColor(Color.parseColor("#4ADE80"))
         } else {
-            binding.btnAutoNext.text = "⏭ Ép. Suivant Auto: OFF"
+            binding.btnAutoNext.text = "⏭ Auto: OFF"
             binding.btnAutoNext.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#2B303B"))
             binding.btnAutoNext.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
         }
@@ -940,58 +939,21 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             jumpBySeconds(+30)
         }
 
-        // --- Télécommande : Volume TV / Xbox (Vol - / Muet / Vol +) ---
-        binding.btnVolDown.setOnClickListener {
-            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
-            lifecycleScope.launch {
-                val res = dlnaController.adjustVolume(ip, -5, lastKnownTvVolume)
-                res.onSuccess { newVol ->
-                    lastKnownTvVolume = newVol
-                    isTvMuted = false
-                    binding.btnVolMute.text = "🔇 Muet"
-                    Toast.makeText(this@MainActivity, "🔉 Volume TV : $newVol%", Toast.LENGTH_SHORT).show()
-                }.onFailure {
-                    Toast.makeText(this@MainActivity, "Volume non supporté par cet appareil DLNA", Toast.LENGTH_SHORT).show()
-                }
-            }
+        // --- Réduire / Ouvrir le panneau de commandes en bas (bouton + swipe vers le bas/haut) ---
+        binding.btnToggleBottomPanel.setOnClickListener {
+            toggleBottomPanel(!isBottomPanelCollapsed)
         }
-
-        binding.btnVolUp.setOnClickListener {
-            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
-            lifecycleScope.launch {
-                val res = dlnaController.adjustVolume(ip, +5, lastKnownTvVolume)
-                res.onSuccess { newVol ->
-                    lastKnownTvVolume = newVol
-                    isTvMuted = false
-                    binding.btnVolMute.text = "🔇 Muet"
-                    Toast.makeText(this@MainActivity, "🔊 Volume TV : $newVol%", Toast.LENGTH_SHORT).show()
-                }.onFailure {
-                    Toast.makeText(this@MainActivity, "Volume non supporté par cet appareil DLNA", Toast.LENGTH_SHORT).show()
-                }
-            }
+        binding.dragHandlePill.setOnClickListener {
+            toggleBottomPanel(!isBottomPanelCollapsed)
         }
-
-        binding.btnVolMute.setOnClickListener {
-            val ip = binding.etXboxIp.text?.toString()?.trim() ?: return@setOnClickListener
-            val nextMute = !isTvMuted
-            lifecycleScope.launch {
-                val res = dlnaController.setMute(ip, nextMute)
-                res.onSuccess { muted ->
-                    isTvMuted = muted
-                    binding.btnVolMute.text = if (muted) "🔊 Son ON" else "🔇 Muet"
-                    Toast.makeText(
-                        this@MainActivity,
-                        if (muted) "🔇 TV en mode Muet" else "🔊 Son de la TV rétabli",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }.onFailure {
-                    Toast.makeText(this@MainActivity, "Mute non supporté par cet appareil DLNA", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+        setupBottomBarSwipeGesture()
 
         // --- Télécommande : Skip Intro Précis (AniSkip API ou +1m25) ---
         binding.btnSkipIntro.setOnClickListener {
+            if (activePreparedStream == null) {
+                Toast.makeText(this, "Lancez d'abord la vidéo sur la TV / Xbox pour sauter l'intro", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             val intro = currentIntroWindow
             if (intro != null && intro.endSec > currentPlaybackSec + 3) {
                 val fmt = formatShortMinSec(intro.endSec)
@@ -1021,6 +983,64 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                 }
             }
         }
+    }
+
+    /**
+     * Réduit (slide vers le bas) ou ré-ouvre (slide vers le haut) le panneau de commandes en bas de l'écran.
+     */
+    private fun toggleBottomPanel(collapse: Boolean) {
+        isBottomPanelCollapsed = collapse
+        val panel = binding.layoutCollapsibleControls
+        if (collapse) {
+            binding.btnToggleBottomPanel.text = "▲ Ouvrir"
+            val heightToSlide = panel.height.takeIf { it > 0 }?.toFloat() ?: 220f
+            panel.animate()
+                .translationY(heightToSlide)
+                .alpha(0f)
+                .setDuration(190L)
+                .withEndAction {
+                    panel.visibility = View.GONE
+                    panel.translationY = 0f
+                }
+                .start()
+        } else {
+            binding.btnToggleBottomPanel.text = "▼ Réduire"
+            panel.visibility = View.VISIBLE
+            panel.alpha = 0f
+            panel.translationY = 180f
+            panel.animate()
+                .translationY(0f)
+                .alpha(1f)
+                .setDuration(190L)
+                .start()
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupBottomBarSwipeGesture() {
+        var downY = 0f
+        val swipeListener = View.OnTouchListener { _, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downY = event.rawY
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    val deltaY = event.rawY - downY
+                    if (deltaY > 38f && !isBottomPanelCollapsed) {
+                        toggleBottomPanel(true)
+                    } else if (deltaY < -38f && isBottomPanelCollapsed) {
+                        toggleBottomPanel(false)
+                    } else if (kotlin.math.abs(deltaY) < 12f) {
+                        toggleBottomPanel(!isBottomPanelCollapsed)
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+        binding.layoutStatusHeader.setOnTouchListener(swipeListener)
+        binding.dragHandlePill.setOnTouchListener(swipeListener)
     }
 
     // =========================================================================
