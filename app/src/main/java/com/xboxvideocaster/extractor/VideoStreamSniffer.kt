@@ -192,8 +192,9 @@ class VideoStreamSniffer(private val context: Context) {
                 }
             }
 
-            // 3. Est-ce une page de film/série French Stream ?
-            if (url.contains("french-stream.") || url.contains("fstream.") || Regex("(?i)fs\\d+\\.").containsMatchIn(url)) {
+            // 3. Est-ce une page de film/série French Stream ou French Manga ?
+            if (url.contains("french-stream.") || url.contains("fstream.") || Regex("(?i)fs\\d+\\.").containsMatchIn(url) ||
+                url.contains("french-manga.") || Regex("(?i)w\\d+\\.french-manga\\.").containsMatchIn(url)) {
                 val fsExtracted = tryExtractFromFrenchStreamPage(url)
                 if (fsExtracted != null) {
                     return@withContext Result.success(fsExtracted)
@@ -343,7 +344,7 @@ class VideoStreamSniffer(private val context: Context) {
                 val uri = java.net.URI(pageUrl)
                 "${uri.scheme}://${uri.host}/"
             } catch (_: Exception) {
-                "https://fs26.lol/"
+                if (pageUrl.contains("french-manga")) "https://w16.french-manga.net/" else "https://fs26.lol/"
             }
 
             val req = Request.Builder()
@@ -357,9 +358,9 @@ class VideoStreamSniffer(private val context: Context) {
                 resp.body?.string() ?: return null
             }
 
-            // Chercher l'URL d'embed du lecteur actif dans la page French Stream (data-url-default ou player-frame)
+            // Chercher l'URL d'embed du lecteur actif dans la page French Stream / French Manga (data-url-default ou player-frame / main-player)
             val candidates = mutableListOf<String>()
-            val iframeMatcher = Pattern.compile("""id=["']player-frame["'][^>]*src=["'](https?://[^"']+)["']""", Pattern.CASE_INSENSITIVE).matcher(html)
+            val iframeMatcher = Pattern.compile("""id=["'](?:player-frame|main-player)["'][^>]*src=["'](https?://[^"']+)["']""", Pattern.CASE_INSENSITIVE).matcher(html)
             if (iframeMatcher.find()) {
                 iframeMatcher.group(1)?.let { candidates.add(it) }
             }

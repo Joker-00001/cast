@@ -638,33 +638,51 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
 
                         // 0. Restaurer automatiquement l'épisode sauvegardé (Favori ou Reprise)
                         var epSelRestore = document.getElementById('selectEpisodes');
-                        if (typeof window.__pendingRestoreEpIdx === 'number' && window.__pendingRestoreEpIdx >= 0 && epSelRestore && epSelRestore.options.length > window.__pendingRestoreEpIdx) {
+                        var fmEpRestore = document.getElementById('episode-select') || document.getElementById('mobile-episode-select');
+                        if (typeof window.__pendingRestoreEpIdx === 'number' && window.__pendingRestoreEpIdx >= 0) {
                             var targetIdx = window.__pendingRestoreEpIdx;
-                            window.__pendingRestoreEpIdx = -1;
-                            if (epSelRestore.selectedIndex !== targetIdx) {
-                                epSelRestore.selectedIndex = targetIdx;
-                                if (typeof selectEpisode === 'function') {
-                                    selectEpisode();
-                                } else {
-                                    epSelRestore.dispatchEvent(new Event('change', { bubbles: true }));
+                            if (epSelRestore && epSelRestore.options.length > targetIdx) {
+                                window.__pendingRestoreEpIdx = -1;
+                                if (epSelRestore.selectedIndex !== targetIdx) {
+                                    epSelRestore.selectedIndex = targetIdx;
+                                    if (typeof selectEpisode === 'function') {
+                                        selectEpisode();
+                                    } else {
+                                        epSelRestore.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }
+                                }
+                            } else if (fmEpRestore && fmEpRestore.options.length > targetIdx) {
+                                window.__pendingRestoreEpIdx = -1;
+                                if (fmEpRestore.selectedIndex !== targetIdx) {
+                                    fmEpRestore.selectedIndex = targetIdx;
+                                    fmEpRestore.dispatchEvent(new Event('change', { bubbles: true }));
                                 }
                             }
                         }
 
                         // Extraire le titre de l'anime/série et le numéro d'épisode actuel pour Favoris, Reprise & AniSkip
                         var rawTitle = document.title || '';
-                        var hTitle = document.querySelector('#titreOeuvre, h1');
-                        if (hTitle && hTitle.textContent && hTitle.textContent.trim().length > 1) {
-                            rawTitle = hTitle.textContent.trim();
+                        var hTitle = document.querySelector('#titreOeuvre, #s-title, #serie-config, h1');
+                        if (hTitle) {
+                            var tVal = hTitle.getAttribute('data-title') || hTitle.textContent || '';
+                            if (tVal.trim().length > 1) {
+                                rawTitle = tVal.trim();
+                            }
                         }
                         var curEpNum = 1;
                         var curEpIdx = -1;
                         var curEpLabel = '';
+                        var fmEpSel = document.getElementById('episode-select') || document.getElementById('mobile-episode-select');
                         if (epSelRestore && epSelRestore.selectedIndex >= 0 && epSelRestore.options[epSelRestore.selectedIndex]) {
                             curEpIdx = epSelRestore.selectedIndex;
                             curEpLabel = epSelRestore.options[curEpIdx].text || ('Épisode ' + (curEpIdx + 1));
                             var mEp = curEpLabel.match(/(\d+)/);
                             curEpNum = mEp ? parseInt(mEp[1], 10) : (curEpIdx + 1);
+                        } else if (fmEpSel && fmEpSel.selectedIndex >= 0 && fmEpSel.options[fmEpSel.selectedIndex]) {
+                            curEpIdx = fmEpSel.selectedIndex;
+                            curEpLabel = fmEpSel.options[curEpIdx].text || ('Épisode ' + (curEpIdx + 1));
+                            var mEpFm = curEpLabel.match(/(\d+)/);
+                            curEpNum = mEpFm ? parseInt(mEpFm[1], 10) : (curEpIdx + 1);
                         } else {
                             var activeFsEp = document.querySelector('.elink.active, .fs-ep-btn.active, .episodes a.active, [data-ep].active');
                             if (activeFsEp) {
@@ -753,9 +771,9 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                             }
                         }
 
-                        // 3. Surveiller les iframes de lecteurs (French Stream #player-frame ou lecteur choisi manuellement)
+                        // 3. Surveiller les iframes de lecteurs (French Stream #player-frame, French-Manga #main-player ou lecteur choisi manuellement)
                         if (!foundPreferredAnimeSama) {
-                            var iframes = document.querySelectorAll('#playerDF, #player-frame, #main-player iframe, #seriePlayer iframe, .iframe-container iframe, iframe[src*="embed"], iframe[src*="ansembed"], iframe[src*="vidmoly"], iframe[src*="sendvid"], iframe[src*="minochinos"], iframe[src*="uqload"], iframe[src*="dood"], iframe[src*="voe"], iframe[src*="luluvdo"], iframe[src*="fsvid"], iframe[src*="vidzy"], iframe[src*="sibnet"]');
+                            var iframes = document.querySelectorAll('#playerDF, #player-frame, iframe#main-player, #main-player iframe, #seriePlayer iframe, .iframe-container iframe, iframe[src*="embed"], iframe[src*="ansembed"], iframe[src*="vidmoly"], iframe[src*="sendvid"], iframe[src*="minochinos"], iframe[src*="uqload"], iframe[src*="dood"], iframe[src*="voe"], iframe[src*="luluvdo"], iframe[src*="fsvid"], iframe[src*="vidzy"], iframe[src*="sibnet"]');
                             for (var k = 0; k < iframes.length; k++) {
                                 var src = iframes[k].src || iframes[k].getAttribute('data-src');
                                 if (src && src.startsWith('http') && src.indexOf('google') === -1) {
@@ -856,6 +874,10 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
             loadBrowserUrl(remoteDomainSync.getFrenchStreamUrl())
         }
 
+        binding.cardSelectFrenchManga.setOnClickListener {
+            loadBrowserUrl(remoteDomainSync.getFrenchMangaUrl())
+        }
+
         binding.btnResumeLastPage.setOnClickListener {
             val savedCastPage = prefs.getString(KEY_LAST_CAST_PAGE_URL, null)
             val savedCastEpIdx = prefs.getInt(KEY_LAST_CAST_EP_IDX, -1)
@@ -873,6 +895,10 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
 
         binding.btnHomeFrenchStream.setOnClickListener {
             loadBrowserUrl(remoteDomainSync.getFrenchStreamUrl())
+        }
+
+        binding.btnHomeFrenchManga.setOnClickListener {
+            loadBrowserUrl(remoteDomainSync.getFrenchMangaUrl())
         }
 
         // --- Favoris & Séries en cours (1 clic) ---
@@ -1619,7 +1645,32 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         return;
                     }
 
-                    // 2. French Stream : cliquer sur le bouton suivant
+                    // 2. French-Manga : mettre à jour le sélecteur d'épisode ou bouton suivant
+                    var fmSel = document.getElementById('episode-select') || document.getElementById('mobile-episode-select');
+                    if (fmSel && fmSel.options.length > $targetEpIdx) {
+                        fmSel.selectedIndex = $targetEpIdx;
+                        fmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                        window.__xboxCastBlanked = true;
+                        setTimeout(function() {
+                            var pFm = document.getElementById('main-player');
+                            if (pFm) pFm.src = 'about:blank';
+                            window.__xboxCastBlanked = true;
+                        }, 250);
+                        return;
+                    }
+                    var fmNextBtn = document.getElementById('next-episode-btn') || document.getElementById('next-episode-btn-mobile');
+                    if (fmNextBtn) {
+                        window.__xboxCastBlanked = true;
+                        fmNextBtn.click();
+                        setTimeout(function() {
+                            var pFm = document.getElementById('main-player');
+                            if (pFm) pFm.src = 'about:blank';
+                            window.__xboxCastBlanked = true;
+                        }, 250);
+                        return;
+                    }
+
+                    // 3. French Stream : cliquer sur le bouton suivant
                     var activeEp = document.querySelector('.elink.active, .fs-ep-btn.active, .episodes a.active, [data-ep].active');
                     if (activeEp && activeEp.nextElementSibling) {
                         window.__xboxCastBlanked = true;
@@ -1673,7 +1724,33 @@ class MainActivity : AppCompatActivity(), CastForegroundService.RemoteActionList
                         }
                     }
 
-                    // 2. Cas French Stream (séries)
+                    // 2. Cas French-Manga
+                    var fmEpSel = document.getElementById('episode-select') || document.getElementById('mobile-episode-select');
+                    var fmNextBtn = document.getElementById('next-episode-btn') || document.getElementById('next-episode-btn-mobile');
+                    if (fmEpSel && fmEpSel.selectedIndex + 1 < fmEpSel.options.length) {
+                        window.__xboxCastBlanked = false;
+                        fmEpSel.selectedIndex = fmEpSel.selectedIndex + 1;
+                        fmEpSel.dispatchEvent(new Event('change', { bubbles: true }));
+                        setTimeout(function() {
+                            var pFrame = document.getElementById('main-player') || document.querySelector('iframe[src*="fsvid"], iframe[src*="vidzy"], iframe[src*="luluvdo"]');
+                            if (pFrame && pFrame.src && pFrame.src.startsWith('http')) {
+                                XboxBridge.onAutoNextEpisodeReady(pFrame.src, window.location.href);
+                            }
+                        }, 1200);
+                        return;
+                    } else if (fmNextBtn) {
+                        window.__xboxCastBlanked = false;
+                        fmNextBtn.click();
+                        setTimeout(function() {
+                            var pFrame = document.getElementById('main-player') || document.querySelector('iframe[src*="fsvid"], iframe[src*="vidzy"], iframe[src*="luluvdo"]');
+                            if (pFrame && pFrame.src && pFrame.src.startsWith('http')) {
+                                XboxBridge.onAutoNextEpisodeReady(pFrame.src, window.location.href);
+                            }
+                        }, 1200);
+                        return;
+                    }
+
+                    // 3. Cas French Stream (séries)
                     var activeEp = document.querySelector('.elink.active, .fs-ep-btn.active, .episodes a.active, [data-ep].active');
                     if (activeEp && activeEp.nextElementSibling) {
                         window.__xboxCastBlanked = false;

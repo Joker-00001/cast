@@ -431,19 +431,15 @@ class LocalStreamProxy(private val context: Context) {
         if (segments.isEmpty()) return
 
         var startIndex = segments.indexOfLast { it.startTimeSec <= startSec }.coerceAtLeast(0)
-        val elapsedSinceSeekOrStartMs = System.currentTimeMillis() - prepared.lastSeekOrStartWallMs
-        val confirmedSec = prepared.currentConfirmedPlaybackSec
 
-        // Si la TV se reconnecte en cours de lecture (> 15s après le lancement ou le dernier saut),
-        // calculer l'index exact à partir de la position réelle de lecture (confirmedSec)
-        // pour ne JAMAIS faire de rollback en arrière ni sauter trop loin en avant !
-        if (elapsedSinceSeekOrStartMs > 15_000L && confirmedSec > startSec + 12) {
-            val targetResumeSec = (confirmedSec - 4).coerceAtLeast(startSec)
-            val resumeIdx = segments.indexOfLast { it.startTimeSec <= targetResumeSec }.coerceAtLeast(startIndex)
-            startIndex = resumeIdx
-        } else if (rangeHeader != null && !rangeHeader.startsWith("bytes=0-") && prepared.highestServedSegmentIdx > startIndex + 1) {
-            val targetResumeSec = (confirmedSec - 4).coerceAtLeast(startSec)
-            startIndex = segments.indexOfLast { it.startTimeSec <= targetResumeSec }.coerceAtLeast(startIndex)
+        // Si la TV se reconnecte en cours de lecture sans commande explicite de saut (startSec == 0)
+        // ou sur une requête Range consécutive, reprendre TOUJOURS au dernier segment déjà envoyé
+        // (highestServedSegmentIdx) pour ne JAMAIS renvoyer d'anciens segments qui causeraient
+        // un retour de 30 secondes ou un redémarrage à 0:00 !
+        if (startSec == 0 && prepared.highestServedSegmentIdx > 0) {
+            startIndex = maxOf(startIndex, prepared.highestServedSegmentIdx)
+        } else if (rangeHeader != null && !rangeHeader.startsWith("bytes=0-") && prepared.highestServedSegmentIdx > startIndex) {
+            startIndex = maxOf(startIndex, prepared.highestServedSegmentIdx)
         }
 
         val connectionStartWallMs = System.currentTimeMillis()
@@ -487,11 +483,11 @@ class LocalStreamProxy(private val context: Context) {
                 }
             }
 
-            // SMART PACING : après avoir envoyé les 4 premiers segments (~40s de buffer initial rapide),
-            // réguler l'envoi pour maintenir un coussin de sécurité d'environ ~40-45s d'avance sur la TV.
-            // Cela absorbe complètement les micro-latences Wi-Fi quand l'écran du téléphone est éteint.
+            // SMART PACING : après avoir envoyé les 2 premiers segments (~20s de buffer initial rapide),
+            // réguler l'envoi pour maintenir un coussin de sécurité d'environ ~20-25s d'avance sur la TV.
+            // Cela absorbe complètement les micro-latences Wi-Fi sans jamais laisser le socket inactif assez longtemps pour déclencher un timeout TCP TV.
             val segmentsSentOnThisConn = i - startIndex
-            if (segmentsSentOnThisConn >= 4) {
+            if (segmentsSentOnThisConn >= 2) {
                 while (true) {
                     if (clientSocket?.isClosed == true || (activeStream != null && activeStream?.id != prepared.id)) {
                         break
@@ -508,11 +504,11 @@ class LocalStreamProxy(private val context: Context) {
                     val realElapsedSec = (System.currentTimeMillis() - connectionStartWallMs) / 1000.0
                     val videoElapsedSec = seg.startTimeSec - connectionBaseVideoSec
                     val bufferAheadSec = videoElapsedSec - realElapsedSec
-                    if (bufferAheadSec <= 45.0) {
+                    if (bufferAheadSec <= 25.0) {
                         break
                     }
                     try {
-                        Thread.sleep(200)
+                        Thread.sleep(120)
                     } catch (_: InterruptedException) {
                         break
                     }
@@ -527,7 +523,7 @@ class LocalStreamProxy(private val context: Context) {
                 out.write(cleanBytes, offset, len)
                 offset += len
                 // Léger lissage entre les blocs après le pré-buffer initial pour un flux Wi-Fi ultra-régulier
-                if (segmentsSentOnThisConn >= 3 && offset < cleanBytes.size) {
+                if (segmentsSentOnThisConn >= 2 && offset < cleanBytes.size) {
                     try {
                         Thread.sleep(6)
                     } catch (_: InterruptedException) {

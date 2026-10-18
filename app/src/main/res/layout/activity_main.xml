@@ -126,6 +126,22 @@
                 app:cornerRadius="8dp" />
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnHomeFrenchManga"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#2D124D"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="7dp"
+                android:text="🌸 FM"
+                android:textColor="#C084FC"
+                android:textSize="11sp"
+                app:cornerRadius="8dp" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnFavorites"
                 style="@style/Widget.Material3.Button.TonalButton"
                 android:layout_width="wrap_content"
@@ -313,6 +329,58 @@
                         android:layout_marginTop="2dp"
                         android:text="Films, Séries Netflix / Prime / Disney+ en VF &amp; VOSTFR"
                         android:textColor="#FDE68A"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Big Button 3: French-Manga -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/cardSelectFrenchManga"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:clickable="true"
+            android:focusable="true"
+            app:cardBackgroundColor="#211033"
+            app:cardCornerRadius="18dp"
+            app:strokeColor="#C084FC"
+            app:strokeWidth="1.5dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="16dp"
+                    android:text="🌸"
+                    android:textSize="30sp" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="French-Manga"
+                        android:textColor="#C084FC"
+                        android:textSize="19sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Animes &amp; OAVs VF / VOSTFR sans coupure"
+                        android:textColor="#E9D5FF"
                         android:textSize="13sp" />
                 </LinearLayout>
             </LinearLayout>

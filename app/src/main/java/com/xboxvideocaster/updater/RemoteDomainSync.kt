@@ -22,9 +22,11 @@ class RemoteDomainSync(private val context: Context, private val prefs: SharedPr
     companion object {
         const val KEY_ANIME_SAMA_URL = "pref_dynamic_anime_sama_url"
         const val KEY_FRENCH_STREAM_URL = "pref_dynamic_french_stream_url"
+        const val KEY_FRENCH_MANGA_URL = "pref_dynamic_french_manga_url"
 
         const val DEFAULT_ANIME_SAMA_HOME = "https://anime-sama.to/"
         const val DEFAULT_FRENCH_STREAM_HOME = "https://fs26.lol/"
+        const val DEFAULT_FRENCH_MANGA_HOME = "https://w16.french-manga.net/"
 
         // Fichier distant sur le dépôt GitHub pour bascule d'urgence sans mise à jour APK
         private const val REMOTE_CONFIG_URL =
@@ -56,6 +58,18 @@ class RemoteDomainSync(private val context: Context, private val prefs: SharedPr
     }
 
     /**
+     * Retourne l'URL active de French-Manga (issue du suivi dynamique, de la config GitHub ou par défaut)
+     */
+    fun getFrenchMangaUrl(): String {
+        val saved = prefs.getString(KEY_FRENCH_MANGA_URL, null)
+        return if (!saved.isNullOrBlank() && saved.startsWith("http")) {
+            ensureTrailingSlash(saved)
+        } else {
+            DEFAULT_FRENCH_MANGA_HOME
+        }
+    }
+
+    /**
      * Récupère en arrière-plan la liste des domaines officiels à jour depuis GitHub.
      * Si l'ancien domaine est mort ou bloqué par les FAI (DNS), l'application bascule automatiquement.
      */
@@ -74,6 +88,7 @@ class RemoteDomainSync(private val context: Context, private val prefs: SharedPr
 
                 val asUrl = json.optString("anime_sama", "").trim()
                 val fsUrl = json.optString("french_stream", "").trim()
+                val fmUrl = json.optString("french_manga", "").trim()
 
                 val editor = prefs.edit()
                 var updated = false
@@ -83,6 +98,10 @@ class RemoteDomainSync(private val context: Context, private val prefs: SharedPr
                 }
                 if (fsUrl.startsWith("http")) {
                     editor.putString(KEY_FRENCH_STREAM_URL, ensureTrailingSlash(fsUrl))
+                    updated = true
+                }
+                if (fmUrl.startsWith("http")) {
+                    editor.putString(KEY_FRENCH_MANGA_URL, ensureTrailingSlash(fmUrl))
                     updated = true
                 }
                 if (updated) {
@@ -96,7 +115,7 @@ class RemoteDomainSync(private val context: Context, private val prefs: SharedPr
 
     /**
      * Analyse toute URL visitée dans le navigateur intégré.
-     * Dès qu'un site effectue une redirection HTTP 301/302 ou JS (ex: fs26.lol -> fs27.lol ou anime-sama.to -> anime-sama.fr),
+     * Dès qu'un site effectue une redirection HTTP 301/302 ou JS (ex: fs26.lol -> fs27.lol, w16.french-manga.net -> w17.french-manga.net, etc.),
      * l'application mémorise immédiatement le nouveau domaine valide.
      */
     fun checkAndSaveVisitedUrl(url: String?) {
@@ -116,6 +135,11 @@ class RemoteDomainSync(private val context: Context, private val prefs: SharedPr
                 val current = getFrenchStreamUrl()
                 if (current != rootUrl) {
                     prefs.edit().putString(KEY_FRENCH_STREAM_URL, rootUrl).apply()
+                }
+            } else if (host.contains("french-manga.") || Regex("(?i)w\\d+\\.french-manga\\.").containsMatchIn(host)) {
+                val current = getFrenchMangaUrl()
+                if (current != rootUrl) {
+                    prefs.edit().putString(KEY_FRENCH_MANGA_URL, rootUrl).apply()
                 }
             }
         } catch (_: Exception) {}
